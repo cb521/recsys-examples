@@ -23,17 +23,21 @@ from configs import InferenceHSTUConfig
 from hstu import hstu_attn_varlen_func
 from modules.jagged_data import JaggedData
 from ops.pt_ops.torch_addmm import torch_addmm_silu_fwd
-from ops.triton_ops.triton_addmm import triton_addmm_silu_fwd
+from ops.triton_ops.triton_addmm import (
+    should_use_triton_addmm_silu,
+    triton_addmm_silu_fwd,
+)
 from ops.triton_ops.triton_layer_norm import triton_weighted_layer_norm_fwd
 from ops.triton_ops.triton_norm_mul_dropout import triton_layer_norm_mul_dropout_fwd
+from ops.unfused import should_force_unfused_hstu
 
 from .debug.debug_paged_hstu_layer import dump, dump_paged_hstu_forward_naive
 
 
 def _select_addmm_silu_impl(sm: int):
-    if sm == 8:
+    if should_use_triton_addmm_silu(sm):
         return triton_addmm_silu_fwd
-    if sm in (9, 10, 12):
+    if sm in (8, 9, 10, 12):
         return torch_addmm_silu_fwd
     raise ValueError(f"Unsupported SM major version: {sm}")
 
@@ -68,6 +72,7 @@ class PagedHSTUInferLayer(torch.nn.Module):
         self._target_group_size = config.target_group_size
         self._alpha = 1.0 / (self._attention_dim_per_head**0.5)
         self._residual = config.residual
+        self._force_unfused = should_force_unfused_hstu()
 
         self._split_arg_list = [
             self._linear_dim_per_head * self._num_heads,
@@ -175,7 +180,9 @@ class PagedHSTUInferLayer(torch.nn.Module):
         return tensor[: batch_size + 1] if is_offsets else tensor[:batch_size]
 
     def uvqk_addmm_impl(self, input_data, num_tokens):
-        if not self._export_mode and num_tokens >= 2048:  # fusion impl
+        if (
+            not self._force_unfused and not self._export_mode and num_tokens >= 2048
+        ):  # fusion impl
             _, silu_output_data = self.addmm_silu_impl(
                 x=input_data,
                 w=self._linear_uvqk_weight,  # transposed
@@ -189,7 +196,7 @@ class PagedHSTUInferLayer(torch.nn.Module):
         return silu_output_data
 
     def uvqk_addmm_inplace_impl(self, input_data, silu_output_data, num_tokens):
-        if num_tokens >= 1024:  # fusion impl
+        if not self._force_unfused and num_tokens >= 1024:  # fusion impl
             self.addmm_silu_impl(
                 x=input_data,
                 w=self._linear_uvqk_weight,  # transposed
@@ -208,7 +215,9 @@ class PagedHSTUInferLayer(torch.nn.Module):
             F.silu(silu_output_data, inplace=True)
 
     def proj_addmm_impl(self, input_data, residual, num_tokens):
-        if not self._export_mode and num_tokens >= 2048:  # fusion impl
+        if (
+            not self._force_unfused and not self._export_mode and num_tokens >= 2048
+        ):  # fusion impl
             output_data, _ = self.addmm_silu_impl(
                 x=input_data,
                 w=self._linear_proj_weight,  # transposed
@@ -224,7 +233,7 @@ class PagedHSTUInferLayer(torch.nn.Module):
         return output_data
 
     def proj_addmm_inplace_impl(self, input_data, residual, output_data, num_tokens):
-        if num_tokens >= 1024:  # fusion impl
+        if not self._force_unfused and num_tokens >= 1024:  # fusion impl
             self.addmm_silu_impl(
                 x=input_data,
                 w=self._linear_proj_weight,  # transposed
@@ -240,7 +249,9 @@ class PagedHSTUInferLayer(torch.nn.Module):
         return output_data
 
     def norm_mul_impl(self, jagged_attn_output, user, enable_fusion):
-        if not self._export_mode and enable_fusion:  # fusion impl
+        if (
+            not self._force_unfused and not self._export_mode and enable_fusion
+        ):  # fusion impl
             parallel_input, _, _, _, _, _ = triton_layer_norm_mul_dropout_fwd(
                 x=jagged_attn_output,
                 u=user,
@@ -418,12 +429,21 @@ class PagedHSTUInferLayer(torch.nn.Module):
         kv_cache_metadata,
     ) -> JaggedData:
         input_tensor = input_buffer[:num_tokens, ...]
-        normed_input, _, _, _, _ = triton_weighted_layer_norm_fwd(
-            x=input_tensor,
-            weight=self._input_layernorm_weight,
-            bias=self._input_layernorm_bias,
-            eps=self._eps,
-        )
+        if self._force_unfused:
+            normed_input = F.layer_norm(
+                input_tensor,
+                normalized_shape=[self._embedding_dim],
+                weight=self._input_layernorm_weight,
+                bias=self._input_layernorm_bias,
+                eps=self._eps,
+            )
+        else:
+            normed_input, _, _, _, _ = triton_weighted_layer_norm_fwd(
+                x=input_tensor,
+                weight=self._input_layernorm_weight,
+                bias=self._input_layernorm_bias,
+                eps=self._eps,
+            )
 
         self.uvqk_addmm_inplace_impl(
             normed_input, self.uvqk_buffer_[:num_tokens, ...], num_tokens

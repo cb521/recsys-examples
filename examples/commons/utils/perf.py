@@ -77,6 +77,7 @@ _ARCH_NAMES = {
     (8, 9): "Ada Lovelace",
     (9, 0): "Hopper",
     (10, 0): "Blackwell",
+    (12, 0): "Blackwell RTX",
 }
 
 # Tensor Core FMA operations per SM per cycle for different architectures.
@@ -127,6 +128,16 @@ _TC_FLOPS_PER_SM_PER_CYCLE = {
         "fp8": 4096,
         "int8": 4096,
     },
+    # RTX Blackwell (SM120).  Dense BF16/FP16 throughput is 512 FMA per
+    # SM per cycle; the final *2 in _calculate_peak_tflops counts mul+add.
+    (12, 0): {
+        "fp32": 256,
+        "tf32": 256,
+        "fp16": 512,
+        "bf16": 512,
+        "fp8": 1024,
+        "int8": 1024,
+    },
 }
 
 # Known GPU peak specs — **DENSE** (without 2:4 structured sparsity).
@@ -172,6 +183,13 @@ _KNOWN_GPU_SPECS: Dict[str, Dict[str, float]] = {
         "bf16": 989,  # dense; sparse = 1979
         "fp8": 1979,  # dense; sparse = 3958
         "int8": 1979,  # dense; sparse = 3958
+    },
+    "H20": {
+        "tf32": 74,
+        "fp16": 148,
+        "bf16": 148,
+        "fp8": 296,
+        "int8": 296,
     },
     # A100 SXM4: 108 SMs, boost ~1410 MHz
     "A100": {

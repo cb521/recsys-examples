@@ -23,7 +23,11 @@ import torch
 from commons.utils.clear_tensor_data import clear_tensor_data
 from configs import KernelBackend
 from ops.pt_ops.torch_addmm import torch_addmm_silu_fwd
-from ops.triton_ops.triton_addmm import triton_addmm_silu_bwd, triton_addmm_silu_fwd
+from ops.triton_ops.triton_addmm import (
+    should_use_triton_addmm_silu,
+    triton_addmm_silu_bwd,
+    triton_addmm_silu_fwd,
+)
 from ops.triton_ops.triton_hstu_attention import (
     triton_hstu_attention_bwd,
     triton_hstu_attention_fwd,
@@ -40,9 +44,9 @@ from ops.triton_ops.triton_norm_mul_dropout import (
 
 def _get_addmm_silu_fwd_impl(device: torch.device):
     sm = torch.cuda.get_device_properties(device).major
-    if sm == 8:
+    if should_use_triton_addmm_silu(sm):
         return triton_addmm_silu_fwd
-    if sm in (9, 10, 12):
+    if sm in (8, 9, 10, 12):
         return torch_addmm_silu_fwd
     raise ValueError(f"Unsupported SM major version: {sm}")
 

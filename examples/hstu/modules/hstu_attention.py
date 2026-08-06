@@ -340,7 +340,7 @@ def create_hstu_attention(
     attn: HSTUAttention
     if kernel_backend == KernelBackend.CUTLASS:
         sm_major_version = torch.cuda.get_device_properties(0).major
-        if sm_major_version in (8, 9, 10):
+        if sm_major_version in (8, 9, 10, 12):
             attn = FusedHSTUAttention(
                 num_heads,
                 attention_dim,

@@ -6,7 +6,7 @@
 # dim_per_head=256, num_heads=4, full_sequence=True, bfloat16).
 #
 # Available key args (see hstu_layer_benchmark.py --help for all):
-#   --layer-type [native|fused|debug]
+#   --layer-type [unfused|native|fused|debug]
 #   --kernel-backend [triton|cutlass|pytorch]
 #   --fuse-norm-mul-dropout [True|False]        (native only)
 #   --recompute-input-layernorm [True|False]
@@ -19,6 +19,7 @@
 #   --full-sequence [True|False]
 #   --dtype [float16|bfloat16]
 
+unfused,--layer-type unfused --kernel-backend cutlass --dim-per-head 256 --num-heads 4 --num-layers 1 --max-seqlen 4096 --batchsize 32 --full-sequence True --dtype bfloat16 --dump-memory-snapshot False
 baseline,--layer-type native --kernel-backend triton --dim-per-head 256 --num-heads 4 --num-layers 1 --max-seqlen 4096 --batchsize 32 --full-sequence True --dtype bfloat16 --dump-memory-snapshot False
 plus_cutlass,--layer-type native --kernel-backend cutlass --dim-per-head 256 --num-heads 4 --num-layers 1 --max-seqlen 4096 --batchsize 32 --full-sequence True --dtype bfloat16 --dump-memory-snapshot False
 plus_fused,--layer-type fused --kernel-backend cutlass --dim-per-head 256 --num-heads 4 --num-layers 1 --max-seqlen 4096 --batchsize 32 --full-sequence True --dtype bfloat16 --dump-memory-snapshot False

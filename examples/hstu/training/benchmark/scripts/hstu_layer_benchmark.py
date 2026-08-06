@@ -14,8 +14,8 @@
 # limitations under the License.
 #!/usr/bin/env python3
 #! example:
-# python ./benchmark/fused_hstu_layer_benchmark.py run \
-# --iters 100 --warmup-iters 50 --layer-type fused \
+# python ./training/benchmark/scripts/hstu_layer_benchmark.py run \
+# --iters 100 --warmup-iters 50 --layer-type unfused \
 # --kernel-backend cutlass --full-sequence True \
 # --dim-per-head 128 --num-heads 4 --num-layers 3 \
 # --dtype bfloat16 --max-seqlen 4096 --batchsize 32 \
@@ -49,6 +49,7 @@ from modules.debug.debug_hstu_layer import HSTULayer as DebugHSTULayer
 from modules.fused_hstu_layer import FusedHSTULayer
 from modules.jagged_data import JaggedData
 from modules.native_hstu_layer import HSTULayer as NativeHSTULayer
+from ops.unfused import FORCE_UNFUSED_HSTU_ENV, should_force_unfused_hstu
 
 _backend_str_to_type = {
     "cutlass": KernelBackend.CUTLASS,
@@ -57,6 +58,7 @@ _backend_str_to_type = {
 }
 
 _layer_type_str_to_type = {
+    "unfused": HSTULayerType.DEBUG,
     "native": HSTULayerType.NATIVE,
     "fused": HSTULayerType.FUSED,
     "debug": HSTULayerType.DEBUG,
@@ -93,8 +95,10 @@ def create_hstu_layer(
 @click.option(
     "--layer-type",
     type=click.Choice(_layer_type_str_to_type.keys()),
-    default="fused",
+    default="unfused",
     required=False,
+    show_default=True,
+    help="unfused uses ordinary PyTorch ops around the selected attention backend",
 )
 @click.option(
     "--async-wgrad",
@@ -173,7 +177,15 @@ def run(
     profile,
     output_dir,
 ):
-    log_layer_type = layer_type.upper()
+    force_unfused = layer_type == "unfused" or should_force_unfused_hstu()
+    if force_unfused:
+        os.environ[FORCE_UNFUSED_HSTU_ENV] = "1"
+        layer_type = "debug"
+        fuse_norm_mul_dropout = False
+        async_wgrad = False
+        log_layer_type = "UNFUSED"
+    else:
+        log_layer_type = layer_type.upper()
     layer_type = _layer_type_str_to_type[layer_type]
     kernel_backend = _backend_str_to_type[kernel_backend]
     dtype = _dtype_str_to_type[dtype]
@@ -200,6 +212,15 @@ def run(
         )
         for _ in range(num_layers)
     ]
+    if force_unfused:
+        if not all(isinstance(block, DebugHSTULayer) for block in hstu_blocks):
+            raise RuntimeError("Training benchmark expected the unfused HSTU layer")
+        if any(block._fuse_norm_mul_dropout for block in hstu_blocks):
+            raise RuntimeError("Training benchmark expected unfused norm/mul/dropout")
+        print(
+            "HSTU execution mode: UNFUSED "
+            f"(PyTorch ops; {kernel_backend.value} attention retained)"
+        )
     # generate random input
     if full_sequence:
         lengths = torch.full((batchsize,), max_seqlen, dtype=torch.int32, device="cuda")

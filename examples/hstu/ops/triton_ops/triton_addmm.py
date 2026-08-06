@@ -28,8 +28,18 @@ import triton
 # @manual=//triton:triton
 import triton.language as tl
 from commons.ops.triton_ops.common import triton_autotune
+from ops.unfused import should_force_unfused_hstu
 
 ENABLE_FULL_TURNING_SPACE = False
+
+
+def should_use_triton_addmm_silu(sm: int) -> bool:
+    """Return whether addmm epilogues should use the fused Triton path."""
+    if should_force_unfused_hstu():
+        return False
+    # The PyTorch path leaves the SiLU epilogue unfused on SM120 Blackwell.
+    return sm in (8, 12)
+
 
 try:
     # @manual=//triton:triton

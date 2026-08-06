@@ -12,8 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import argparse
 import itertools
 import math
+import os
 from typing import List
 
 import torch
@@ -22,6 +24,7 @@ from configs import InferenceEmbeddingConfig, RankingConfig, get_inference_hstu_
 from kvcache_cpp import KVOnloadHandle
 from modules.inference_dense_module import InferenceDenseModule, copy_jagged_metadata
 from modules.jagged_data import JaggedData
+from ops.unfused import FORCE_UNFUSED_HSTU_ENV
 from recsys_kvcache_manager.host_kvstorage_manager import (
     HostKVTaskHandle,
     HostKVTaskStatus,
@@ -269,7 +272,16 @@ def run_single_bench(
     new_history_length,
     num_targets,
     use_cudagraph,
+    num_warmups=10,
+    num_iterations=10,
+    profile=False,
+    profile_iteration=2,
 ):
+    if profile and not 0 <= profile_iteration < num_iterations:
+        raise ValueError(
+            "profile_iteration must select one of the measured iterations"
+        )
+
     num_input_sets = 2
     input_list = test_input(
         num_input_sets,
@@ -290,9 +302,6 @@ def run_single_bench(
         model.kvcache.gpu_kvcache_mgr.gpu_kvcache_tables,
     )
 
-    num_warumps = 10
-    num_iterations = 10
-
     if use_cudagraph:
         total_tokens = batch_size * (new_history_length + num_targets)
 
@@ -300,7 +309,7 @@ def run_single_bench(
             enable_timing=True
         )
         torch.cuda.synchronize()
-        for i in range(num_warumps):
+        for i in range(num_warmups):
             hidden_states, jd_metadata, kvcache_metadata = input_list[
                 i % num_input_sets
             ]
@@ -320,6 +329,10 @@ def run_single_bench(
 
         ts_start.record()
         for i in range(num_iterations):
+            capture_iteration = profile and i == profile_iteration
+            if capture_iteration:
+                torch.cuda.synchronize()
+                torch.cuda.profiler.start()
             hidden_states, jd_metadata, kvcache_metadata = input_list[
                 i % num_input_sets
             ]
@@ -335,6 +348,9 @@ def run_single_bench(
                 model._jagged_metadata,
                 model._kvcache_metadata,
             )
+            if capture_iteration:
+                torch.cuda.synchronize()
+                torch.cuda.profiler.stop()
         ts_end.record()
         torch.cuda.synchronize()
         time1 = ts_start.elapsed_time(ts_end)
@@ -379,7 +395,7 @@ def run_single_bench(
             enable_timing=True
         )
         torch.cuda.synchronize()
-        for i in range(num_warumps):
+        for i in range(num_warmups):
             hidden_states, jd_metadata, kvcache_metadata = input_list[
                 i % num_input_sets
             ]
@@ -394,6 +410,10 @@ def run_single_bench(
 
         ts_start.record()
         for i in range(num_iterations):
+            capture_iteration = profile and i == profile_iteration
+            if capture_iteration:
+                torch.cuda.synchronize()
+                torch.cuda.profiler.start()
             hidden_states, jd_metadata, kvcache_metadata = input_list[
                 i % num_input_sets
             ]
@@ -404,6 +424,9 @@ def run_single_bench(
                 jd_metadata,
                 kvcache_metadata,
             )
+            if capture_iteration:
+                torch.cuda.synchronize()
+                torch.cuda.profiler.stop()
         ts_end.record()
         torch.cuda.synchronize()
         time1 = ts_start.elapsed_time(ts_end)
@@ -428,14 +451,27 @@ def run_single_bench(
         print("time(ms)", ts_start.elapsed_time(ts_end) / num_iterations)
 
 
-def run_benchmark():
+def run_benchmark(
+    batch_sizes=(1, 2, 4, 8),
+    total_history_lengths=(128, 256, 512, 1024, 2048, 4096),
+    new_history_lengths=(128, 256, 512, 1024, 2048, 4096),
+    num_targets=256,
+    num_warmups=10,
+    num_iterations=10,
+    num_layers=8,
+    profile=False,
+    profile_iteration=2,
+):
+    # This benchmark compares GPU hardware with the same ordinary-op HSTU path.
+    # Keep production inference defaults unchanged outside this entry point.
+    os.environ[FORCE_UNFUSED_HSTU_ENV] = "1"
     sm_major = torch.cuda.get_device_capability()[0]
     page_size = 128 if sm_major >= 10 and sm_major < 12 else 32
     num_pages = math.ceil(10240 * 32 / page_size)
     kwargs = {
         # model config
         "embedding_dim": 1024,
-        "num_layers": 8,
+        "num_layers": num_layers,
         "num_heads": 4,
         "head_dim": 256,
         "dtype": torch.bfloat16,
@@ -456,6 +492,15 @@ def run_benchmark():
 
     with torch.inference_mode():
         model = benchmark_model(**kwargs)
+        if not all(
+            layer._force_unfused for layer in model._hstu_block._attention_layers
+        ):
+            raise RuntimeError("Paged HSTU benchmark expected the unfused path")
+        print(
+            "HSTU execution mode: UNFUSED "
+            "(PyTorch LayerNorm/Linear/SiLU/mul/residual; paged attention retained)"
+        )
+        print(f"HSTU layers: {num_layers}")
         out_buffer = torch.empty_like(model._hidden_states)
 
         print(
@@ -468,13 +513,13 @@ def run_benchmark():
             num_targets,
         ) in itertools.product(
             # batch_size
-            [1, 2, 4, 8],
+            batch_sizes,
             # total_history_length
-            [128, 256, 512, 1024, 2048, 4096],
+            total_history_lengths,
             # new_history_length
-            [128, 256, 512, 1024, 2048, 4096],
+            new_history_lengths,
             # num_targets
-            [256],
+            [num_targets],
         ):
             # skips
             if new_history_length > total_history_length:
@@ -503,9 +548,68 @@ def run_benchmark():
                 new_history_length,
                 num_targets,
                 kwargs["use_cudagraph"],
+                num_warmups=num_warmups,
+                num_iterations=num_iterations,
+                profile=profile,
+                profile_iteration=profile_iteration,
             )
             print()
 
 
+def _parse_int_list(value):
+    return tuple(int(item) for item in value.split(","))
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--batch-sizes", type=_parse_int_list, default=(1, 2, 4, 8))
+    parser.add_argument(
+        "--total-history-lengths",
+        type=_parse_int_list,
+        default=(128, 256, 512, 1024, 2048, 4096),
+    )
+    parser.add_argument(
+        "--new-history-lengths",
+        type=_parse_int_list,
+        default=(128, 256, 512, 1024, 2048, 4096),
+    )
+    parser.add_argument("--num-targets", type=int, default=256)
+    parser.add_argument("--warmup-iters", type=int, default=10)
+    parser.add_argument("--iters", type=int, default=10)
+    parser.add_argument("--num-layers", type=int, default=8)
+    parser.add_argument("--profile", action="store_true")
+    parser.add_argument(
+        "--profile-iteration",
+        type=int,
+        default=3,
+        help="one-based measured iteration to capture after warmup",
+    )
+    args = parser.parse_args()
+    if args.num_layers < 1:
+        parser.error("--num-layers must be at least 1")
+    if args.profile:
+        case_count = (
+            len(args.batch_sizes)
+            * len(args.total_history_lengths)
+            * len(args.new_history_lengths)
+        )
+        if case_count != 1:
+            parser.error("--profile requires exactly one benchmark case")
+        if not 1 <= args.profile_iteration <= args.iters:
+            parser.error("--profile-iteration must be between 1 and --iters")
+    return args
+
+
 if __name__ == "__main__":
-    run_benchmark()
+    args = parse_args()
+    run_benchmark(
+        batch_sizes=args.batch_sizes,
+        total_history_lengths=args.total_history_lengths,
+        new_history_lengths=args.new_history_lengths,
+        num_targets=args.num_targets,
+        num_warmups=args.warmup_iters,
+        num_iterations=args.iters,
+        num_layers=args.num_layers,
+        profile=args.profile,
+        profile_iteration=args.profile_iteration - 1,
+    )
