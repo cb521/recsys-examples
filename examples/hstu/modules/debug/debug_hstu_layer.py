@@ -37,6 +37,10 @@ from modules.hstu_attention import create_hstu_attention
 from modules.jagged_data import JaggedData
 from modules.utils import init_mlp_weights_optional_bias
 from ops.pt_ops.pt_norm_mul_dropout import pytorch_norm_mul_dropout
+from ops.triton_ops.sm120_hstu_gemm import (
+    should_use_sm120_hstu_gemm,
+    sm120_hstu_linear,
+)
 from ops.triton_ops.triton_norm_mul_dropout import triton_norm_mul_dropout
 
 
@@ -237,7 +241,18 @@ class HSTULayer(MegatronModule):
             )
             num_heads_compute = self._num_heads // self._tp_size
         else:
-            mixed_uvqk = self._linear_uvqk(hidden_states)
+            if should_use_sm120_hstu_gemm(
+                hidden_states,
+                self._linear_uvqk.weight,
+                self._linear_uvqk.bias,
+            ):
+                mixed_uvqk = sm120_hstu_linear(
+                    hidden_states,
+                    self._linear_uvqk.weight,
+                    self._linear_uvqk.bias,
+                )
+            else:
+                mixed_uvqk = self._linear_uvqk(hidden_states)
             num_heads_compute = self._num_heads
 
         if self._debug_check_tp_equal:
@@ -421,7 +436,18 @@ class HSTULayer(MegatronModule):
 
             # this is the regular/default behavior
             if not self._debug_mock_tp and not self._debug_shortcut_proj_linear:
-                output = self._linear_proj(parallel_input)
+                if should_use_sm120_hstu_gemm(
+                    parallel_input,
+                    self._linear_proj.weight,
+                    self._linear_proj.bias,
+                ):
+                    output = sm120_hstu_linear(
+                        parallel_input,
+                        self._linear_proj.weight,
+                        self._linear_proj.bias,
+                    )
+                else:
+                    output = self._linear_proj(parallel_input)
             if not self._debug_mock_tp and self._debug_shortcut_proj_linear:
                 output = parallel_input
             if self._debug_check_tp_equal:
