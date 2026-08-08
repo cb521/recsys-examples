@@ -72,3 +72,57 @@ def test_sm120_hstu_linear_forward_backward(n, has_bias):
     torch.testing.assert_close(weight.grad, weight_ref.grad, rtol=2e-2, atol=2e-2)
     if bias is not None:
         torch.testing.assert_close(bias.grad, bias_ref.grad, rtol=2e-2, atol=2e-2)
+
+
+def test_sm120_hstu_linear_preserves_higher_order_gradients(monkeypatch):
+    torch.manual_seed(1)
+    m = 128
+    input = (
+        torch.empty((m, 512), dtype=torch.bfloat16, device="cuda")
+        .uniform_(-0.1, 0.1)
+        .requires_grad_()
+    )
+    weight = (
+        torch.empty((512, 512), dtype=torch.bfloat16, device="cuda")
+        .uniform_(-0.1, 0.1)
+        .requires_grad_()
+    )
+    grad_output = (
+        torch.empty((m, 512), dtype=torch.bfloat16, device="cuda")
+        .uniform_(-0.1, 0.1)
+        .requires_grad_()
+    )
+    input_ref = input.detach().clone().requires_grad_()
+    weight_ref = weight.detach().clone().requires_grad_()
+    grad_output_ref = grad_output.detach().clone().requires_grad_()
+
+    def fail_if_called(*_args):
+        raise AssertionError("Triton dgrad must not run while building a grad graph")
+
+    monkeypatch.setattr(sm120_gemm, "_sm120_hstu_output_dgrad", fail_if_called)
+    actual = sm120_hstu_linear(input, weight)
+    expected = F.linear(input_ref, weight_ref)
+    actual_first = torch.autograd.grad(
+        actual, (input, weight), grad_output, create_graph=True
+    )
+    expected_first = torch.autograd.grad(
+        expected, (input_ref, weight_ref), grad_output_ref, create_graph=True
+    )
+    for actual_grad, expected_grad in zip(actual_first, expected_first):
+        torch.testing.assert_close(actual_grad, expected_grad, rtol=2e-2, atol=2e-2)
+
+    probes = [torch.randn_like(grad) for grad in actual_first]
+    actual_scalar = sum(
+        (grad.float() * probe.float()).sum()
+        for grad, probe in zip(actual_first, probes)
+    )
+    expected_scalar = sum(
+        (grad.float() * probe.float()).sum()
+        for grad, probe in zip(expected_first, probes)
+    )
+    actual_second = torch.autograd.grad(actual_scalar, (input, weight, grad_output))
+    expected_second = torch.autograd.grad(
+        expected_scalar, (input_ref, weight_ref, grad_output_ref)
+    )
+    for actual_grad, expected_grad in zip(actual_second, expected_second):
+        torch.testing.assert_close(actual_grad, expected_grad, rtol=2e-2, atol=2e-2)

@@ -145,6 +145,103 @@ def _sm120_hstu_gemm_forward(
     return output
 
 
+@triton.jit
+def _sm120_hstu_gemm_dgrad_kernel(
+    grad_output_ptr,
+    weight_ptr,
+    grad_input_ptr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
+):
+    """Compute ``grad_output[M, K] @ weight[K, N]``."""
+    pid = tl.program_id(0)
+    num_pid_m = tl.cdiv(M, BLOCK_M)
+    num_pid_n = tl.cdiv(N, BLOCK_N)
+    num_pid_in_group = GROUP_M * num_pid_n
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_M
+    group_size_m = tl.minimum(num_pid_m - first_pid_m, GROUP_M)
+    pid_m = first_pid_m + (pid % group_size_m)
+    pid_n = (pid % num_pid_in_group) // group_size_m
+
+    offsets_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offsets_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offsets_k = tl.arange(0, BLOCK_K)
+    grad_output_ptrs = grad_output_ptr + offsets_m[:, None] * K + offsets_k[None, :]
+    weight_ptrs = weight_ptr + offsets_k[:, None] * N + offsets_n[None, :]
+
+    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for _ in range(0, K, BLOCK_K):
+        grad_output_tile = tl.load(grad_output_ptrs)
+        weight_tile = tl.load(weight_ptrs)
+        accumulator += tl.dot(grad_output_tile, weight_tile)
+        grad_output_ptrs += BLOCK_K
+        weight_ptrs += BLOCK_K * N
+
+    grad_input_ptrs = grad_input_ptr + offsets_m[:, None] * N + offsets_n[None, :]
+    tl.store(grad_input_ptrs, accumulator)
+
+
+def _should_use_sm120_output_dgrad(
+    grad_output: torch.Tensor,
+    weight: torch.Tensor,
+) -> bool:
+    """Return whether the Output projection's tuned input-gradient path is safe."""
+    if torch.is_grad_enabled():
+        # Keep the differentiable PyTorch path when building a higher-order graph.
+        return False
+    if not (
+        grad_output.dtype == torch.bfloat16
+        and weight.dtype == torch.bfloat16
+        and grad_output.is_cuda
+        and weight.is_cuda
+        and grad_output.device == weight.device
+        and grad_output.is_contiguous()
+        and weight.is_contiguous()
+        and grad_output.ndim == 2
+        and weight.shape == (512, 512)
+        and grad_output.shape[1] == 512
+        and grad_output.shape[0] % 128 == 0
+    ):
+        return False
+    device_index = grad_output.device.index
+    if device_index is None:
+        device_index = torch.cuda.current_device()
+    return _device_is_sm120(device_index)
+
+
+def _sm120_hstu_output_dgrad(
+    grad_output: torch.Tensor,
+    weight: torch.Tensor,
+) -> torch.Tensor:
+    m, k = grad_output.shape
+    n = weight.shape[1]
+    grad_input = torch.empty((m, n), dtype=grad_output.dtype, device=grad_output.device)
+    block_m = 128
+    block_n = 128
+    grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
+    _sm120_hstu_gemm_dgrad_kernel[grid](
+        grad_output,
+        weight,
+        grad_input,
+        m,
+        n,
+        k,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=32,
+        GROUP_M=32,
+        num_warps=8,
+        num_stages=3,
+    )
+    return grad_input
+
+
 class _Sm120HSTUGemmFunction(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -165,7 +262,10 @@ class _Sm120HSTUGemmFunction(torch.autograd.Function):
         input, weight = ctx.saved_tensors
         grad_input = grad_weight = grad_bias = None
         if ctx.needs_input_grad[0]:
-            grad_input = torch.mm(grad_output, weight)
+            if _should_use_sm120_output_dgrad(grad_output, weight):
+                grad_input = _sm120_hstu_output_dgrad(grad_output, weight)
+            else:
+                grad_input = torch.mm(grad_output, weight)
         if ctx.needs_input_grad[1]:
             grad_weight = torch.mm(grad_output.t(), input)
         if ctx.has_bias and ctx.needs_input_grad[2]:
