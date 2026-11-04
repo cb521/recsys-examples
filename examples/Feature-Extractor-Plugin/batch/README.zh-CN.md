@@ -7,7 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 
 [English](README.md) | 中文
 
-这是 [spark-rapids](https://github.com/NVIDIA/spark-rapids) 的一个插件。特征工程里常见的一长串逐行表达式，比如四则运算、类型转换、比较、`CASE` 分支，原本要分很多步算，它把这些合成**一个自动生成的 GPU kernel**，结果和 spark-rapids 逐位一致。插件是一个独立的 jar，不改 spark-rapids 本身。
+这是 [spark-rapids](https://github.com/NVIDIA/spark-rapids) 的一个插件。特征工程里常见的一长串"每行独立计算"的表达式，比如四则运算、类型转换、比较、`CASE` 分支，原本要分很多步算，它把这些合成**一个自动生成的 GPU kernel**，结果和 spark-rapids 逐位一致。插件是一个独立的 jar，不改 spark-rapids 本身。
+
+"每行独立计算"说的是计算方式，不是存储方式：每一行的结果只用到这一行自己的值（比如 `play_time / duration`），不看别的行。数据始终是 cuDF 的列存格式，kernel 读入各列，每个 GPU 线程负责一行。需要看别的行的计算（聚合、排序、窗口、join）不融合。
 
 本文分三部分：
 
@@ -86,6 +88,8 @@ SPDX-License-Identifier: Apache-2.0
             +- GpuFileGpuScan parquet [...]
    ```
 
+   用 nsys 实测这条查询：过滤和投影两部分加起来，spark-rapids 每批数据要启动 **91 个 kernel**，用插件后是 **20 个**（其中按掩码挑行的 14 个两边一样）。图里按名字列出了这些 kernel。
+
    插件还会对每个候选节点打印一行决策；没有融合的，也会写明原因：
 
    ```
@@ -108,7 +112,7 @@ SPDX-License-Identifier: Apache-2.0
 
 ## 3. 适合什么场景
 
-**适合**：特征和样本生成任务，投影、过滤或聚合输入里有大量数值型逐行表达式，比如四则运算、类型转换、比较、`CASE` / `IF`、`least` / `greatest`、`log` / `exp` / `pow`、`pmod`、哈希类整数运算、取日期字段。如果算出的结果继续留在 GPU 上用（喂给训练、做聚合或 join），而不是直接写文件，效果更明显。
+**适合**：特征和样本生成任务，投影、过滤或聚合输入里有大量数值型、每行独立计算的表达式，比如四则运算、类型转换、比较、`CASE` / `IF`、`least` / `greatest`、`log` / `exp` / `pow`、`pmod`、哈希类整数运算、取日期字段。如果算出的结果继续留在 GPU 上用（喂给训练、做聚合或 join），而不是直接写文件，效果更明显。
 
 **收益很小或没有收益**：以读写文件、join、shuffle、聚合为主的任务；字符串、decimal、嵌套类型的逻辑（不融合）；只有一两个算子的表达式。
 

@@ -7,9 +7,15 @@ SPDX-License-Identifier: Apache-2.0
 
 English | [中文](README.zh-CN.md)
 
-An add-on for [spark-rapids](https://github.com/NVIDIA/spark-rapids) that fuses chains of row-wise expressions
-(the arithmetic, casts, comparisons and `CASE` branches typical of feature engineering) into **one generated GPU
-kernel**, with results bit-identical to spark-rapids. It is a separate jar; spark-rapids itself is not modified.
+An add-on for [spark-rapids](https://github.com/NVIDIA/spark-rapids) that fuses chains of row-independent
+expressions (the arithmetic, casts, comparisons and `CASE` branches typical of feature engineering) into **one
+generated GPU kernel**, with results bit-identical to spark-rapids. It is a separate jar; spark-rapids itself is not
+modified.
+
+"Row-independent" describes the computation, not the storage: each output row depends only on the same row's input
+values (like `play_time / duration`). The data stays in cuDF's columnar format; the kernel reads the input columns and
+gives each row to one GPU thread. Computations that look at other rows (aggregations, sorting, windows, joins) are
+not fused.
 
 This page explains:
 
@@ -115,6 +121,10 @@ The plan texts are the real ones printed by Spark and spark-rapids, shortened.
             +- GpuFileGpuScan parquet [...]
    ```
 
+   In an nsys trace of this query, the filter and the projection together launch **91 kernels per batch** on
+   spark-rapids and **20** with the plugin (the 14 kernels that gather the selected rows are the same on both sides);
+   the figure lists them by name.
+
    The plugin also prints one decision line per candidate, including the reason when something is not fused:
 
    ```
@@ -151,7 +161,7 @@ real data; `spark.rapids.sql.fusion.kill=true` turns the rewrite off. Details:
 
 ## 3. Where it fits
 
-**Good fit**: feature and sample generation with many numeric row-wise expressions in a projection, filter or
+**Good fit**: feature and sample generation with many numeric row-independent expressions in a projection, filter or
 aggregate input - arithmetic, casts, comparisons, `CASE` / `IF`, `least` / `greatest`, `log` / `exp` / `pow`, `pmod`
 and hashing-style integer math, date parts - especially when the result stays on the GPU (fed to training,
 aggregated, joined) instead of going straight to a file.
