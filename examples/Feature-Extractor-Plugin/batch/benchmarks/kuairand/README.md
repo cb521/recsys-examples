@@ -60,7 +60,7 @@ normal) are in [../REPRODUCE.md](../REPRODUCE.md). In short, after the build and
 
 ```bash
 # once, CPU only: CSV -> Parquet
-reference/plugin/scripts/run-spark.sh -n 32 spark-submit benchmarks/kuairand/prepare_data.py \
+plugin/scripts/run-spark.sh -n 32 spark-submit benchmarks/kuairand/prepare_data.py \
     --src <KuaiRand-27K/data> --log-file log_standard_4_22_to_5_08_27k_part2.csv --dst <data dir>
 # all five cases, one GPU (about 25 minutes)
 DATA=<data dir> OUT=<output dir> benchmarks/kuairand/run_all.sh

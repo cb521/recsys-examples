@@ -34,7 +34,7 @@ directories you choose (`$WORK`, `$DATA_ROOT`).
 | Spark | 3.5.9, prebuilt for Hadoop 3 (Scala 2.12) |
 | spark-rapids | `rapids-4-spark_2.12-26.08.1-cuda12.jar` |
 | Maven | 3.9.9 (build only) |
-| Plugin | `gpu-fusion-plugin-0.1.0` built from `reference/plugin` (Scala 2.12.18, JCuda 12.0.0 shaded in) |
+| Plugin | `gpu-fusion-plugin-0.1.0` built from `plugin` (Scala 2.12.18, JCuda 12.0.0 shaded in) |
 
 Disk: about 10 GB for the archive, 7 GB for the three CSV files used, 2 GB for the Parquet tables, plus scratch space
 for Spark and the per-case outputs (the cases write their results, about 1-2 GB per case). Use a fast local disk for the data and for `FUSION_WORK`.
@@ -83,9 +83,9 @@ plugin itself runs against the normal spark-rapids jar), then build with Maven (
 
 ```bash
 cd $BATCH
-reference/plugin/scripts/make-shim-jar.sh       # writes $TOOLCHAIN_DIR/rapids-shim359.jar
-reference/plugin/scripts/build.sh               # writes reference/plugin/target/gpu-fusion-plugin-0.1.0.jar
-reference/plugin/scripts/selftest.sh            # optional, no GPU: planner checks + every kernel compiles with NVRTC for sm_75..sm_120
+plugin/scripts/make-shim-jar.sh       # writes $TOOLCHAIN_DIR/rapids-shim359.jar
+plugin/scripts/build.sh               # writes plugin/target/gpu-fusion-plugin-0.1.0.jar
+plugin/scripts/selftest.sh            # optional, no GPU: planner checks + every kernel compiles with NVRTC for sm_75..sm_120
 ```
 
 Behind a proxy, give Maven the proxy through `MAVEN_OPTS` (see the header of `build.sh`).
@@ -110,7 +110,7 @@ Only these three files are used: one exposure log (`part2`, about 7 GB, 92,919,7
 cd $BATCH
 export FUSION_WORK=$DATA_ROOT/work          # scratch directory for Spark (spark.local.dir); fast disk
 export SPARK_DRIVER_MEM=200g                # we used 200g and 32 local threads for this one-off conversion
-reference/plugin/scripts/run-spark.sh -n 32 spark-submit benchmarks/kuairand/prepare_data.py \
+plugin/scripts/run-spark.sh -n 32 spark-submit benchmarks/kuairand/prepare_data.py \
     --src $DATA_ROOT/KuaiRand-27K/data --log-file log_standard_4_22_to_5_08_27k_part2.csv --dst $DATA_ROOT/data
 ```
 
@@ -136,11 +136,11 @@ export DATA=$DATA_ROOT/data OUT=$DATA_ROOT/out
 benchmarks/kuairand/run_all.sh
 ```
 
-`run_all.sh` is a thin loop around `reference/plugin/scripts/run-spark.sh` + `benchmarks/kuairand/run_case.py`. For one case
+`run_all.sh` is a thin loop around `plugin/scripts/run-spark.sh` + `benchmarks/kuairand/run_case.py`. For one case
 (here case A) the full command is:
 
 ```bash
-FUSION_DUMP_DIR=$OUT/a_sample_features/kernels reference/plugin/scripts/run-spark.sh -n 8 spark-submit \
+FUSION_DUMP_DIR=$OUT/a_sample_features/kernels plugin/scripts/run-spark.sh -n 8 spark-submit \
     --conf spark.sql.extensions=com.nvidia.spark.rapids.fusion.FusionExtension \
     --conf spark.rapids.memory.pinnedPool.size=8g \
     benchmarks/kuairand/run_case.py --case benchmarks/kuairand/cases/a_sample_features.sql --data $DATA --out $OUT
