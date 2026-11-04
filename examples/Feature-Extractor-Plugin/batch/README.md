@@ -5,6 +5,8 @@ SPDX-License-Identifier: Apache-2.0
 
 # Feature-Extractor-Plugin: batch (Spark)
 
+English | [中文](README.zh-CN.md)
+
 An add-on for [spark-rapids](https://github.com/NVIDIA/spark-rapids) that fuses chains of row-wise expressions
 (the arithmetic, casts, comparisons and `CASE` branches typical of feature engineering) into **one generated GPU
 kernel**, with results bit-identical to spark-rapids. It is a separate jar; spark-rapids itself is not modified.
