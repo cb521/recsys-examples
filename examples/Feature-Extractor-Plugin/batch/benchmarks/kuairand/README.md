@@ -54,12 +54,14 @@ decided to fuse (verbatim), the fused plan with the generated kernel source, per
 
 ## How to run
 
+Step-by-step instructions (hardware and software versions, where to download every dependency, how to build the plugin,
+how to get and convert the data, the exact command and settings of every case, the numbers we got and how much deviation is
+normal) are in [../REPRODUCE.md](../REPRODUCE.md). In short, after the build and the one-off data conversion:
+
 ```bash
 # once, CPU only: CSV -> Parquet
-plugin/scripts/run-spark.sh spark-submit benchmarks/kuairand/prepare_data.py \
-    --src <KuaiRand-27K/data> --log-file <log csv> --dst <data dir>
-# one case (repeat per case; B = case A with --sink gpu_agg)
-FUSION_DUMP_DIR=<out>/<case>/kernels plugin/scripts/run-spark.sh -p <partition> spark-submit \
-    --conf spark.sql.extensions=com.nvidia.spark.rapids.fusion.FusionExtension \
-    benchmarks/kuairand/run_case.py --case benchmarks/kuairand/cases/<case>.sql --data <data dir> --out <out>
+reference/plugin/scripts/run-spark.sh -n 32 spark-submit benchmarks/kuairand/prepare_data.py \
+    --src <KuaiRand-27K/data> --log-file log_standard_4_22_to_5_08_27k_part2.csv --dst <data dir>
+# all five cases, one GPU (about 25 minutes)
+DATA=<data dir> OUT=<output dir> benchmarks/kuairand/run_all.sh
 ```

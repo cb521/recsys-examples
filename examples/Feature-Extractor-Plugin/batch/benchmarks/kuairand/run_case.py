@@ -10,16 +10,23 @@ Writes to <out>/<case>/:
     plan_cpu.txt, plan_gpu.txt, plan_fused.txt   executed physical plans
     fusion_decisions.txt                         what the plugin fused / did not fuse and why
     kernels/*.cu                                 generated CUDA source (when FUSION_DUMP_DIR points there)
-    timings.json                                 per-round wall times and medians (modes interleaved per round)
+    timings.json                                 wall times and medians (see "Timing protocol" below)
+    check.txt                                    row-level equality of the three outputs (cpu / gpu / fused)
 
 Sinks (what happens to the feature rows, i.e. what is timed):
     parquet  : write the features as Parquet (offline sample generation), the default
     gpu_agg  : reduce every feature column to a sum on the device and collect one row, so the rows never leave the
                GPU (stands in for "features go straight into GPU training")
     noop     : Spark's noop sink (forces a columnar-to-row conversion of every row on the host)
-    check.txt                                    row-level equality of the three outputs
 
 Must be started with FUSION_DUMP_DIR=<out>/<case>/kernels so the plugin dumps the kernels it compiles.
+
+Timing protocol (the one used for the published numbers):
+  1. cpu: one warm-up run, then --cpu-reps timed runs, measured first and on their own (reference only).
+  2. gpu and fused: --warmup untimed rounds, then --reps timed rounds. Inside every round both configurations run
+     once, and the order alternates (even rounds: gpu first, odd rounds: fused first) so that neither always runs
+     first. Both run in the same Spark session on the same data with the same spark-rapids settings; only
+     spark.rapids.sql.fusion.mode differs (OFF / SAFE).
 """
 import argparse
 import json
@@ -35,8 +42,7 @@ MODES = ["cpu", "gpu", "fused"]
 def configure(spark, mode):
     spark.conf.set("spark.rapids.sql.enabled", "false" if mode == "cpu" else "true")
     spark.conf.set("spark.rapids.sql.fusion.mode", "SAFE" if mode.startswith("fused") else "OFF")
-    # fused_nosync: do not synchronize the stream after every fused kernel (default is to synchronize)
-    spark.conf.set("spark.rapids.sql.fusion.syncAfterLaunch", "false" if mode == "fused_nosync" else "true")
+    spark.conf.set("spark.rapids.sql.fusion.syncAfterLaunch", "true")
 
 
 def register_tables(spark, data):
@@ -67,12 +73,11 @@ def main():
     ap.add_argument("--case", required=True, help="path to a .sql file holding one SELECT")
     ap.add_argument("--data", required=True, help="directory with the Parquet tables made by prepare_data.py")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--reps", type=int, default=7)
-    ap.add_argument("--warmup", type=int, default=2)
+    ap.add_argument("--reps", type=int, default=20, help="timed rounds for gpu and fused")
+    ap.add_argument("--warmup", type=int, default=10, help="untimed warm-up rounds for gpu and fused")
+    ap.add_argument("--cpu-reps", type=int, default=5, help="timed CPU runs (plus one untimed warm-up)")
     ap.add_argument("--sink", default="parquet", choices=["parquet", "gpu_agg", "noop"])
-    ap.add_argument("--nosync", action="store_true", help="also time fused without the per-kernel stream synchronize")
     a = ap.parse_args()
-    modes = MODES + (["fused_nosync"] if a.nosync else [])
 
     name = os.path.splitext(os.path.basename(a.case))[0] + ("" if a.sink == "parquet" else "_" + a.sink.replace("_", ""))
     out = os.path.join(a.out, name)
@@ -96,18 +101,26 @@ def main():
             with open(os.path.join(out, "fusion_decisions.txt"), "w") as f:
                 f.write(jvm.com.nvidia.spark.rapids.fusion.Fusion.explain(df._jdf))
 
-    # 2. timings: warm-up, then modes interleaved inside every round
-    times = {m: [] for m in modes}
+    # 2. timings: cpu first and alone, then gpu / fused with alternating order inside every round
+    cpu = []
+    for r in range(1 + a.cpu_reps):
+        configure(spark, "cpu")
+        t = run(spark.sql(sql), a.sink, os.path.join(out, "sink_cpu"))
+        if r >= 1:
+            cpu.append(t)
+    times = {"cpu": cpu, "gpu": [], "fused": []}
     for r in range(a.warmup + a.reps):
-        for mode in modes:
+        for mode in (["gpu", "fused"] if r % 2 == 0 else ["fused", "gpu"]):
             configure(spark, mode)
             t = run(spark.sql(sql), a.sink, os.path.join(out, f"sink_{mode}"))
             if r >= a.warmup:
                 times[mode].append(t)
     med = {m: statistics.median(v) for m, v in times.items()}
+    wins = sum(1 for g, f in zip(times["gpu"], times["fused"]) if f < g)
     with open(os.path.join(out, "timings.json"), "w") as f:
-        json.dump({"reps": a.reps, "warmup": a.warmup, "sink": a.sink,
-                   "seconds": times, "median": med,
+        json.dump({"reps": a.reps, "warmup": a.warmup, "cpu_reps": a.cpu_reps, "sink": a.sink,
+                   "order": "gpu/fused alternate first every round; cpu measured separately before",
+                   "seconds": times, "median": med, "fused_faster_rounds": wins,
                    "fused_vs_gpu_speedup": med["gpu"] / med["fused"],
                    "gpu_vs_cpu_speedup": med["cpu"] / med["gpu"]}, f, indent=1)
 
