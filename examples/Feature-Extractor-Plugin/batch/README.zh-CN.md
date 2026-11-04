@@ -34,25 +34,25 @@ SPDX-License-Identifier: Apache-2.0
 
 ### 1.1 从远程存储读数据
 
-![远程读取](docs/images/bottleneck-read.svg)
+![远程读取](docs/images/bottleneck-read.zh-CN.svg)
 
 读 Parquet/ORC 文件时，要先请求文件尾部的元数据，再逐个请求需要的列数据块，每次请求都要在网络上来回一趟。读缓冲小或者小文件多，请求次数就多，读取线程大部分时间在等，GPU 也没有数据可解码。这一段的时间，GPU kernel 再快也省不下来。
 
 ### 1.2 解压和解码（写文件时反过来）
 
-![解码](docs/images/bottleneck-decode.svg)
+![解码](docs/images/bottleneck-decode.zh-CN.svg)
 
 表达式开始计算之前，压缩过的数据页要先解压（ZSTD、Snappy 等），再解码成普通的列（字典编码、游程编码、位打包、definition/repetition levels）。写文件是同样的过程倒过来做。这是逐字节的格式处理，耗时取决于数据的大小和布局，和查询里有多少计算无关。字符串和嵌套类型最费时间。
 
 ### 1.3 Shuffle
 
-![Shuffle](docs/images/bottleneck-shuffle.svg)
+![Shuffle](docs/images/bottleneck-shuffle.zh-CN.svg)
 
 按 key 做 join 或 group-by 时，同一个 key 的所有行要汇到同一个 task 上，所以两个阶段之间要把每一行重新分组。整个 shuffle 里只有一步跨机器，其余的都是每台机器自己的活：分区、在显存和内存之间拷贝、按目标分组或排序、序列化、压缩、落到本地文件，接收方再反着做一遍，其中很多在 CPU 上。实际中，shuffle 重的任务慢，主要慢在这些本地工作上，不在网络。
 
 ### 1.4 表达式计算：每个算子调一次 GPU
 
-![逐算子 kernel 与融合 kernel 对比](docs/images/fusion-kernel.svg)
+![逐算子 kernel 与融合 kernel 对比](docs/images/fusion-kernel.zh-CN.svg)
 
 在 GPU 上，spark-rapids 按节点逐个计算表达式树。每个算子（`cast`、`+`、`/`、`least` 等）都是一次单独的 cuDF 调用：启动一个 kernel，把整列中间结果写进显存，之后常常还要做一次流同步；下一个算子再把这列读回来。一个有几十个算子的特征投影，每批数据就会变成几百个小 kernel 和几百次同步。**插件去掉的就是这部分开销**：它把整棵树编译成一个 kernel，每个输入列只读一次，中间值全留在寄存器里，最后只写出结果列。
 
@@ -62,7 +62,7 @@ SPDX-License-Identifier: Apache-2.0
 
 下图拿 KuaiRand 的用例 C（先过滤样本，再算五个特征）走完每一步规划。图里的执行计划都是 Spark 和 spark-rapids 实际打印出来的，只做了缩短。
 
-![规划流程](docs/images/plan-flow.svg)
+![规划流程](docs/images/plan-flow.zh-CN.svg)
 
 1. **SQL → 解析后的逻辑计划。** 解析器生成 `'Project` / `'Filter` / `'UnresolvedRelation` 组成的树，名字还没有解析（前面带 `'`）。
 2. **分析后的逻辑计划。** 解析出列名和类型，Spark 自动补上隐式类型转换，例如 `play_time_ms / 1000D` 变成 `cast(play_time_ms as double) / 1000.0`。
