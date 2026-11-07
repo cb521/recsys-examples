@@ -50,23 +50,32 @@ Only model-written tokens are in the loss, but every token still goes through ev
 
 ---
 
-## 2. How it differs from coding-agent RL
+## 2. What kind of training it is, and the hard scenarios
 
-AI search and coding agents (SWE-style tasks) are both multi-turn, tool-using RL and are the closest pair. Below is where AI search is more extreme. A qualitative comparison; the coding-agent column is not measured.
+AI-search RL is multi-turn, tool-using RL, the same family as coding agents and multi-turn games: the model writes, calls a tool, the result is appended to the context, and it writes again until it answers. The hard parts are broadly shared across this family; how much each one matters depends on the task.
 
-| Difference | AI search | Coding agents | Impact | Components |
-|---|---|---|---|---|
-| **Read-heavy** | Each turn retrieves thousands of tokens of documents; the model writes a few hundred. Retrieved text is interleaved with the answer and keeps piling up | Also read files and logs, but model-written code and commands are a larger share | Inference is mostly prefill; the context keeps growing; most training tokens are outside the loss but still computed | `response_logits`, `kvepoch` / `kvfresh` |
-| **Long, identical prompt** | Long system prompt + question, identical across a group's n answers | Task and repository context, also shared within a group | Computing the prefix once pays off | `prefix_tree` (stub) |
-| **Many fast tool calls, unpredictable duration** | A few to 100+ searches per question, tens of ms to seconds each | Few calls, each slow (tests, builds) | GPUs wait on tools; a few questions hold up the batch, so training must be async with a staleness bound | `ticket_admission`, `prefetch` |
-| **Load drifts during training** | The model learns to search more; trajectories get longer | Also drifts, but tool time depends mostly on the task | In-flight amounts and GPU splits set at the start soon stop fitting | `ticket_admission`, `pool_fill` |
-| **Bottleneck often CPU and scheduling** | Many small requests; one process cannot send them fast enough (measured on ASearcher, see section 3) | Mostly sandbox and environment resources | Shard the rollout client over processes | `rshard` |
-| **Unreliable tool service, but reusable results** | Search services rate-limit, time out and fail; real search APIs cost money. Identical queries can be cached and merged | Code runs are per trajectory and not reusable | The tool tail becomes the trajectory tail; caching and backup requests save time directly | `toolcache`, `tool_hedge` |
+Below are hard scenarios that can show up in industry. We built a synthetic version of each to see where each component should matter; only *f1* (the Qwen3-Next run) has reported numbers (see section 5).
 
-Common to both: a trajectory spans several weight updates, so stale caches must be invalidated and MoE routing / sparse attention must match between inference and training (`kvepoch` / `kvfresh`, `r3_transfer`). Also, pass **token IDs** between turns (re-tokenizing breaks training) and mask retrieved tokens out of the loss.
+| | Scenario | Why it hurts | Components |
+|---|---|---|---|
+| a | Single turn, very long prompt | Almost no token is in the loss, yet all go through every layer | `response_logits`, `prefix_tree` (stub) |
+| b | Multi-turn retrieval | Many small, bursty requests; prefix KV goes stale after syncs | `rshard`, `toolcache`, `prefetch`, `kvepoch` / `kvfresh` |
+| c | A few slow trajectories hold up the batch (uneven questions, extreme outliers, bimodal answer lengths) | The step waits for the last one; tail decode batches shrink to a few sequences; drop-based staleness control loses them | `ticket_admission`, `pool_fill`, `verl_ceiling` |
+| d | 100k+ token trajectories | Full-vocabulary logits spike memory; long prefill | `response_logits` |
+| e | Easy/hard mix that drifts during training | A fixed in-flight amount is wrong half the time | `ticket_admission`, `pool_fill`, `prefetch` |
+| f | Tool jitter, timeouts, failures | The tool tail becomes the trajectory tail | `toolcache`, `tool_hedge`, `rshard` |
+| g | Mixed tools (search, long page fetch, slow sandboxed code) | Long returns add prefill; the sandbox queues; caching cannot help unique code calls | `toolcache` (search/fetch), `rshard`, `kvepoch` / `kvfresh` |
+| h | Thousands of in-flight trajectories | The control plane saturates before the GPU | `rshard`, `pool_fill`, `toolcache` |
+| i | An engine or node dies mid-run | Lost work, slow restart | `jitcache` only (no failover yet) |
+| j | Hot MoE experts | The busiest EP rank sets the pace | `expert_placement` (stub), `r3pack` |
+| k | Different training : rollout GPU ratios | The optimum moves; more engines make sync costlier | `weight_sync`, `prefetch` |
+| l | Larger GRPO groups (e.g. n = 16) | A group waits for its slowest member; the shared prefix repeats n times | `prefix_tree` (stub), `toolcache`, `kvepoch` |
+| m | Long single-turn mixed with multi-turn | Unbalanced micro-batches; prefill and decode interfere | None (relies on the framework's dynamic batching) |
+| n | Slow reward / LLM judge | Reward time adds to the step | None yet |
+
+Two easy mistakes in any multi-turn tool-using RL: pass **token IDs** between turns (re-tokenizing breaks training), and mask tool output out of the loss.
 
 ---
-
 
 ## 3. Bottlenecks: small dense vs. large MoE
 
@@ -151,7 +160,7 @@ All components are opt-in. Switches and defaults: [docs/COMPONENTS.md](docs/COMP
 | Qwen3-Next 80B-A3B · 4× B300 | verl best config (separate async, off-policy limit 3, partial rollout, routing replay) | 4 | **1.560×** [1.389, 1.719] | See below. |
 
 **Qwen3-Next caveats**
-1. One scenario, synthetic search tool (*g1*: latency jitter, timeouts, errors), so rewards show a trend only. Scaled-down layout: 2 training + 2 rollout nodes, 64 prompts × 8 answers.
+1. One scenario, synthetic search tool (*f1*: latency jitter, timeouts, errors), so rewards show a trend only. Scaled-down layout: 2 training + 2 rollout nodes, 64 prompts × 8 answers.
 2. Measured with `ws direct` on. It is now off by default because it caused rare hangs (1 in 60 syncs; verl also hung 1 in 63, cause unknown). Not re-measured; the whole weight-sync group is worth ~1% (not significant).
 3. Measured with ticket admission on. Turning it off here is ~2.3% faster, so 1.560× is conservative.
 4. Our samples were nearly all at staleness 2, verl's ~99.6% at staleness 1 (both within the bound). Part of the gain may come from this; not measured separately.
@@ -160,30 +169,6 @@ All components are opt-in. Switches and defaults: [docs/COMPONENTS.md](docs/COMP
 
 ---
 
-## 6. Hard scenarios
-
-Synthetic versions of industrial cases, used to see where each component should matter. Only *g1* (the Qwen3-Next run) has reported numbers.
-
-| | Scenario | Why it hurts | Components |
-|---|---|---|---|
-| a | Single turn, very long prompt | Almost no token is in the loss, yet all go through every layer | `response_logits`, `prefix_tree` (stub) |
-| b | Multi-turn retrieval | Many small, bursty requests; prefix KV goes stale after syncs | `rshard`, `toolcache`, `prefetch`, `kvepoch` / `kvfresh` |
-| c | Long tail across questions | A few long trajectories hold up the batch | `ticket_admission`, `pool_fill`, `verl_ceiling` |
-| d | 100k+ token trajectories | Full-vocabulary logits spike memory; long prefill | `response_logits` |
-| e | Easy/hard mix that drifts during training | A fixed in-flight amount is wrong half the time | `ticket_admission`, `pool_fill`, `prefetch` |
-| f | A few extremely slow trajectories | The step waits for the last one; drop-based staleness control loses them | `ticket_admission`, `verl_ceiling` |
-| g | Tool jitter, timeouts, failures | The tool tail becomes the trajectory tail | `toolcache`, `tool_hedge`, `rshard` |
-| h | Mixed tools (search, long page fetch, slow sandboxed code) | Long returns add prefill; the sandbox queues; caching cannot help unique code calls | `toolcache` (search/fetch), `rshard`, `kvepoch` / `kvfresh` |
-| i | Bimodal answer lengths | Decode batches shrink to a few sequences at the tail | `ticket_admission`, `pool_fill` |
-| j | Thousands of in-flight trajectories | The control plane saturates before the GPU | `rshard`, `pool_fill`, `toolcache` |
-| k | An engine or node dies mid-run | Lost work, slow restart | `jitcache` only (no failover yet) |
-| l | Hot MoE experts | The busiest EP rank sets the pace | `expert_placement` (stub), `r3pack` |
-| m | Different training : rollout GPU ratios | The optimum moves; more engines make sync costlier | `weight_sync`, `prefetch` |
-| n | Larger GRPO groups (e.g. n = 16) | A group waits for its slowest member; the shared prefix repeats n times | `prefix_tree` (stub), `toolcache`, `kvepoch` |
-| o | Long single-turn mixed with multi-turn | Unbalanced micro-batches; prefill and decode interfere | None (relies on the framework's dynamic batching) |
-| p | Slow reward / LLM judge | Reward time adds to the step | None yet |
-
----
 
 ## Install
 

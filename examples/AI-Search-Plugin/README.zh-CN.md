@@ -50,23 +50,32 @@ flowchart LR
 
 ---
 
-## 2. 和代码智能体 RL 的区别
+## 2. AI 搜属于哪类训练，会遇到哪些难题
 
-AI 搜和代码智能体（SWE 类任务）都是"多轮调工具"的 RL，最接近。下面是 AI 搜更突出的地方。定性对比，代码智能体一列没有实测。
+AI 搜属于"多轮调工具"的 RL 训练，和代码智能体、多轮游戏是一类：模型写一段 → 调工具 → 工具结果拼回上下文 → 再写，直到给出答案。这类训练的难点大体相同，只是在不同任务里轻重不一样。
 
-| 区别 | AI 搜 | 代码智能体 | 带来的影响 | 对应组件 |
-|---|---|---|---|---|
-| **读多写少** | 每轮搜回几千词的文档，模型只写几百词；搜索结果夹在回答中间，一轮轮往上堆 | 也读文件和日志，但模型自己写的代码、命令占比更高 | 推理主要花在读入（prefill）；上下文越滚越长；训练里大量 token 不进 loss 却照样要算 | `response_logits`、`kvepoch` / `kvfresh` |
-| **开头又长又相同** | 系统提示 + 题目很长，一组 n 个回答完全相同 | 题目和仓库上下文，组内同样共享 | 开头只算一遍，收益大 | `prefix_tree`（空壳） |
-| **工具调用又多又快，耗时没法预测** | 一道题搜几次到上百次，每次几十毫秒到几秒 | 次数少，每次慢（跑测试、编译） | GPU 常在等工具；少数题拖很久，一批都得等它 → 必须异步，并限制样本多旧 | `ticket_admission`、`prefetch` |
-| **负载随训练变化** | 模型越练越爱搜，轨迹越来越长 | 也会变，但工具耗时主要由任务决定 | 一开始分好的在途数量和机器很快不合适 | `ticket_admission`、`pool_fill` |
-| **瓶颈常在 CPU 和调度** | 请求又碎又多，一个进程发不过来（ASearcher 实测，见第 3 节） | 主要在沙箱和环境资源 | 要把 rollout 客户端拆到多个进程 | `rshard` |
-| **工具服务不稳，但结果能复用** | 搜索服务会限流、超时、失败；真实搜索 API 还贵。同样的查询可以缓存、合并 | 代码执行各跑各的，没法复用 | 工具的长尾就是轨迹的长尾；缓存和备份请求能直接省时间 | `toolcache`、`tool_hedge` |
+下面是工业里可能遇到的难题场景。我们为每个场景做了合成版本，用来检查各组件该在哪里起作用；只有 *f1*（Qwen3-Next 那次）报了数字（见第 5 节）。
 
-两边都有的：一条轨迹会跨过几次权重更新，旧缓存要作废，MoE 路由、稀疏注意力在推理和训练间要对齐（`kvepoch` / `kvfresh`、`r3_transfer`）。另外，轮与轮之间要传 **token ID**（重新分词会把训练搞坏），搜回来的 token 要从 loss 里 mask 掉。
+| | 场景 | 难在哪 | 对应组件 |
+|---|---|---|---|
+| a | 单轮、超长提示 | 几乎没有 token 进 loss，却都要过每一层 | `response_logits`、`prefix_tree`（空壳） |
+| b | 多轮检索 | 大量小而突发的请求；同步后前缀 KV 过期 | `rshard`、`toolcache`、`prefetch`、`kvepoch` / `kvfresh` |
+| c | 少数慢轨迹拖住整批（题目间快慢不一、个别慢得离谱、回答长度两极分化） | 每步等最后一条；尾部 decode 只剩几条序列，GPU 空转；靠丢样本控陈旧度的框架会丢掉它们 | `ticket_admission`、`pool_fill`、`verl_ceiling` |
+| d | 10 万+ token 的轨迹 | 全词表 logits 显存尖峰；prefill 很长 | `response_logits` |
+| e | 难易比例随训练漂移 | 固定的在途数量一半时间都不对 | `ticket_admission`、`pool_fill`、`prefetch` |
+| f | 工具抖动、超时、失败 | 工具的长尾变成轨迹的长尾 | `toolcache`、`tool_hedge`、`rshard` |
+| g | 多工具混用（搜索、长网页抓取、沙箱里的慢代码） | 长返回加重 prefill；沙箱排队；缓存帮不了不重复的代码调用 | `toolcache`（搜索/抓取）、`rshard`、`kvepoch` / `kvfresh` |
+| h | 数千条在途轨迹 | 控制面先于 GPU 打满 | `rshard`、`pool_fill`、`toolcache` |
+| i | 引擎或节点中途挂掉 | 丢活、重启慢 | 只有 `jitcache`（还没有故障切换） |
+| j | MoE 热点专家 | 最忙的 EP rank 决定速度 | `expert_placement`（空壳）、`r3pack` |
+| k | 训练 : 推理 GPU 比例不同 | 最优点会变；引擎越多同步越贵 | `weight_sync`、`prefetch` |
+| l | 更大的 GRPO 组（如 n = 16） | 一组等最慢的成员；共享前缀重复 n 次 | `prefix_tree`（空壳）、`toolcache`、`kvepoch` |
+| m | 长单轮与多轮混合 | micro-batch 不均；prefill 和 decode 互相干扰 | 无（靠框架的动态 batching） |
+| n | 奖励慢 / LLM 评判 | 奖励时间加到每步上 | 暂无 |
+
+多轮调工具的训练还要注意两点：轮与轮之间要传 **token ID**（重新分词会把训练搞坏）；工具返回的 token 要从 loss 里 mask 掉。
 
 ---
-
 
 ## 3. 瓶颈：小 dense 模型 vs. 大 MoE 模型
 
@@ -151,7 +160,7 @@ AI 搜和代码智能体（SWE 类任务）都是"多轮调工具"的 RL，最�
 | Qwen3-Next 80B-A3B · 4 台 B300 | verl 最优配置（分离式异步，off-policy 上限 3，partial rollout，路由回放） | 4 | **1.560×** [1.389, 1.719] | 见下方说明。 |
 
 **Qwen3-Next 的说明**
-1. 只测了一个场景，搜索工具是模拟的（*g1*：延迟抖动、超时、报错），奖励只看趋势。缩小版布局：2 台训练 + 2 台推理，64 题 × 每题 8 个回答。
+1. 只测了一个场景，搜索工具是模拟的（*f1*：延迟抖动、超时、报错），奖励只看趋势。缩小版布局：2 台训练 + 2 台推理，64 题 × 每题 8 个回答。
 2. 测速时 `ws direct` 开着。后来因为偶发卡死（每 60 次同步 1 次；verl 也每 63 次卡 1 次，原因不明）默认关掉了。没有重测；整个权重同步组件组约 1%（不显著）。
 3. 测速时 ticket 准入开着。在这个场景关掉它快约 2.3%，所以 1.560× 偏保守。
 4. 我们的样本几乎都在陈旧度 2，verl 约 99.6% 在陈旧度 1（都在上限内）。部分收益可能来自这一点，没有单独测。
@@ -160,30 +169,6 @@ AI 搜和代码智能体（SWE 类任务）都是"多轮调工具"的 RL，最�
 
 ---
 
-## 6. 难题场景
-
-按工业场景做的合成版本，用来看各组件该在哪里起作用。只有 *g1*（Qwen3-Next 那次）报了数字。
-
-| | 场景 | 难在哪 | 对应组件 |
-|---|---|---|---|
-| a | 单轮、超长提示 | 几乎没有 token 进 loss，却都要过每一层 | `response_logits`、`prefix_tree`（空壳） |
-| b | 多轮检索 | 大量小而突发的请求；同步后前缀 KV 过期 | `rshard`、`toolcache`、`prefetch`、`kvepoch` / `kvfresh` |
-| c | 题目间长尾 | 少数长轨迹拖住整批 | `ticket_admission`、`pool_fill`、`verl_ceiling` |
-| d | 10 万+ token 的轨迹 | 全词表 logits 显存尖峰；prefill 很长 | `response_logits` |
-| e | 难易比例随训练漂移 | 固定的在途数量一半时间都不对 | `ticket_admission`、`pool_fill`、`prefetch` |
-| f | 少数极慢的轨迹 | 每步等最后一条；靠丢样本控陈旧度的框架会丢掉它们 | `ticket_admission`、`verl_ceiling` |
-| g | 工具抖动、超时、失败 | 工具的长尾变成轨迹的长尾 | `toolcache`、`tool_hedge`、`rshard` |
-| h | 多工具混用（搜索、长网页抓取、沙箱里的慢代码） | 长返回加重 prefill；沙箱排队；缓存帮不了不重复的代码调用 | `toolcache`（搜索/抓取）、`rshard`、`kvepoch` / `kvfresh` |
-| i | 回答长度两极分化 | 尾部 decode batch 只剩几条序列 | `ticket_admission`、`pool_fill` |
-| j | 数千条在途轨迹 | 控制面先于 GPU 打满 | `rshard`、`pool_fill`、`toolcache` |
-| k | 引擎或节点中途挂掉 | 丢活、重启慢 | 只有 `jitcache`（还没有故障切换） |
-| l | MoE 热点专家 | 最忙的 EP rank 决定速度 | `expert_placement`（空壳）、`r3pack` |
-| m | 训练 : 推理 GPU 比例不同 | 最优点会变；引擎越多同步越贵 | `weight_sync`、`prefetch` |
-| n | 更大的 GRPO 组（如 n = 16） | 一组等最慢的成员；共享前缀重复 n 次 | `prefix_tree`（空壳）、`toolcache`、`kvepoch` |
-| o | 长单轮与多轮混合 | micro-batch 不均；prefill 和 decode 互相干扰 | 无（靠框架的动态 batching） |
-| p | 奖励慢 / LLM 评判 | 奖励时间加到每步上 | 暂无 |
-
----
 
 ## 安装
 
