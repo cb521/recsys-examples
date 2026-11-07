@@ -50,20 +50,17 @@ Only model-written tokens are in the loss, but every token still goes through ev
 
 ---
 
-## 2. How it differs from mainstream RL post-training
+## 2. How it differs from coding-agent RL
 
-A qualitative comparison, not measured.
+AI search and coding agents (SWE-style tasks) are both multi-turn, tool-using RL and face essentially the same problems; none is unique to AI search. The difference is degree: AI search is an extreme case.
 
-| | RLHF (preference alignment) | Reasoning RL (math / code, RLVR) | Coding-agent RL (SWE-style) | AI-search RL |
+| | Coding-agent RL | AI-search RL | Impact | Components |
 |---|---|---|---|---|
-| **Reward** | Reward model score | Rule check (answer match, unit tests) | Run the tests | Answer match (EM / F1) or LLM judge |
-| **One trajectory** | Single turn, short answer | Single turn, very long chain of thought | Multi-turn: edit code, run commands | Multi-turn: search → read → search again |
-| **Who writes the tokens** | The model | The model | Model + tool output (code, logs) | Mostly retrieved documents |
-| **External environment** | None | None (or a grader) | Sandbox, heavy per call | Retrieval service, many light calls |
-| **What is slow** | Several models (actor / critic / reward / reference) run in turn | A few very long generations hold up the batch | Sandbox execution, environment start-up | Scheduling many small requests (CPU), tool tail latency, prefill of long documents |
-| **What the system needs** | Multi-model scheduling | Async and load balancing for long generations | Environment pools, sandbox scheduling | Async with a staleness bound, a scalable rollout client, logits on response tokens only, prefix-KV invalidation after weight updates |
-
-AI search is closest to coding agents (multi-turn + tools). The difference: search calls are many and light and return long text, so the bottleneck sits in scheduling and prefill rather than in the tool itself.
+| **What a sample contains** | Model-written code and commands, plus files and logs returned by tools | Mostly retrieved documents; the model writes little | Inference is mostly prefill; most training tokens are outside the loss but still computed | `response_logits` |
+| **Shared prompt** | Task and repository context, also sizable | Long system prompt + question, identical across a group's n answers | Computing the prefix once pays off | `prefix_tree` (stub) |
+| **Tool calls** | Few and slow (tests, builds: seconds to minutes) | Many and fast (tens of ms to seconds) | A few questions are held up by tools, so training must be async with a staleness bound | `ticket_admission`, `pool_fill`, `prefetch` |
+| **Bottleneck** | Sandbox and environment resources | Often the CPU and scheduling of the request sender (measured on ASearcher, see section 3) | Shard the rollout client; merge duplicate searches | `rshard`, `toolcache` |
+| **Weight updates** | A trajectory spans several updates | Same, with more turns | Stale caches must be invalidated; MoE routing and sparse attention must match between inference and training | `kvepoch` / `kvfresh`, `r3_transfer` |
 
 Two easy mistakes in any multi-turn RL: pass **token IDs** between turns (re-tokenizing breaks training), and mask retrieved tokens out of the loss.
 
