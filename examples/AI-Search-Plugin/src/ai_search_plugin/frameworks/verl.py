@@ -28,6 +28,8 @@ _FEATURES = {
     "toolcache": ["toolcache"],
     "response_logits": ["response_logits"],
     "jitcache": ["jitcache"],
+    "expert_placement": ["place"],
+    "prefix_tree": [],
 }
 
 
@@ -77,6 +79,10 @@ def plan(components="default", options: Optional[dict] = None) -> Plan:
     mods = [m for m in os.environ.get("VERL_USE_EXTERNAL_MODULES", "").split(",") if m.strip()]
     if "ai_search_plugin.verl_plugin" not in mods:
         mods.append("ai_search_plugin.verl_plugin")
+    if "prefix_tree" in names:
+        env["ASRT_PREFIX_TREE"] = "1"
+        if "ai_search_plugin.prefix_tree.verl_plugin" not in mods:
+            mods.append("ai_search_plugin.prefix_tree.verl_plugin")
     env["VERL_USE_EXTERNAL_MODULES"] = ",".join(mods)
     if "verl_inplace" in names:
         p.notes.append("verl_inplace: requests that span a weight sync see old/mixed/new weights (behaviour logprobs "

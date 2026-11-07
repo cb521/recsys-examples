@@ -143,7 +143,12 @@ COMPONENTS: List[Component] = [
        ("adapters.jitcache",), needs=("jitcache_dir",), notes="Off unless a cache directory is given."),
     _C("prefix_tree", MODEL_AGNOSTIC,
        "Train a GRPO group's shared prompt prefix once (prefix-tree packing) instead of once per sample.",
-       ("slime", "verl"), False, "(not ported)", STUB, ("stubs.prefix_tree",)),
+       ("slime", "verl"), False,
+       "ASRT_PREFIX_TREE=1; slime: megatron_init chain + rollout wrapper prefix_tree.adapters.slime_pack; "
+       "verl: VERL_USE_EXTERNAL_MODULES+=ai_search_plugin.prefix_tree.verl_plugin",
+       PORTED, ("prefix_tree",),
+       notes="Megatron backend. slime: CP1/PP1; verl: THD + zigzag CP. Under CP>=2 siblings other than the first "
+             "differ from the flat path by bf16 rounding of the shared prompt. GPU code NOT tested in this repo."),
     # ------------------------------------------------------------------ (2) model-family
     _C("r3_transfer", MODEL_FAMILY,
        "Routing replay (R3) data path: routed-expert ids stored as int16/uint8 for transfer, copy-free R3 validation.",
@@ -165,14 +170,30 @@ COMPONENTS: List[Component] = [
        "Sparse-attention selection replay: record the rollout's top-k selection and replay it in training.",
        ("slime",), False, "(not ported)", STUB, ("stubs.dsa_replay",), family="DSA sparse attention"),
     _C("r3_ep_plan", MODEL_FAMILY,
-       "Plan the EP all-to-all from the replayed routes ahead of time (sync-free MoE dispatch under R3).",
-       ("slime",), False, "(not ported)", STUB, ("stubs.r3_ep_plan",), family="MoE with rollout routing replay (R3)"),
+       "Plan the EP all-to-all from the replayed routes once per step: no per-layer count all-gather / host sync in "
+       "Megatron's alltoall MoE dispatcher under R3; runtime plan-vs-routing guard.",
+       ("slime",), False, "ASRT_CHAIN_MEGATRON_INIT+=slime_r3plan.megatron_init (R3 + alltoall dispatcher)", PORTED,
+       ("adapters.slime_r3plan", "adapters.megatron_r3plan", "r3plan"), family="MoE with rollout routing replay (R3)",
+       conflicts=("hybridep_overlap",),
+       notes="First step verified exactly, per-step device check, falls back to Megatron's path on mismatch. "
+             "GPU code NOT tested in this repo."),
     _C("expert_placement", MODEL_FAMILY,
        "Re-place experts across EP ranks from R3 routing counts when imbalance is high (auto-off otherwise).",
-       ("slime", "verl"), False, "(not ported)", STUB, ("stubs.expert_placement",), family="MoE"),
+       ("slime", "verl"), False,
+       "slime: ASRT_CHAIN_MEGATRON_INIT+=slime_placement.megatron_init; verl: ASRT_VERL+=place", PORTED,
+       ("adapters.slime_placement", "adapters.verl_placement", "adapters.megatron_placement",
+        "adapters.place_verify", "placement_py"), family="MoE",
+       notes="Megatron backend only; not valid with group-limited routing (moe_router_num_groups). Auto-off below "
+             "ASRT_PLACE_MIN_IMB (1.15). GPU / multi-rank paths NOT tested in this repo."),
     _C("hybridep_overlap", MODEL_FAMILY,
-       "HybridEP dispatch/combine with 2-chunk compute/communication overlap.",
-       ("slime",), False, "(not ported)", STUB, ("stubs.hybridep_overlap",), family="MoE"),
+       "HybridEP dispatch/combine (Megatron flex dispatcher) with 2-chunk compute/communication overlap in the MoE layer.",
+       ("slime",), False,
+       "--moe-token-dispatcher-type flex --moe-flex-dispatcher-backend hybridep + megatron_init chain; "
+       "ASRT_HYBRIDEP=auto, ASRT_HYBRIDEP_CHUNKS=2", PORTED,
+       ("adapters.megatron_hybridep", "adapters.slime_hybridep"), family="MoE",
+       conflicts=("r3_ep_plan",),
+       notes="Needs Megatron-Core with the HybridEP flex backend and DeepEP's hybrid-ep build; overlap patch checked "
+             "on Megatron-Core 0.19 only (auto mode falls back otherwise). GPU code NOT tested in this repo."),
     _C("gdn_cudnn", MODEL_FAMILY,
        "cuDNN gated-delta-net kernels in training (slime only).",
        ("slime",), False, "(not ported)", STUB, ("stubs.gdn_cudnn",), family="GDN (gated delta net) linear attention"),

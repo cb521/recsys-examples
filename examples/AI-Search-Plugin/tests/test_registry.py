@@ -49,7 +49,7 @@ def test_resolve_rules():
     assert [c.name for c in R.resolve("slime", "default,-tool_hedge")] == [n for n in d if n != "tool_hedge"]
     assert R.resolve("verl", "none") == []
     with pytest.raises(ValueError):
-        R.resolve("slime", ["prefix_tree"])            # stub
+        R.resolve("slime", ["gdn_cudnn"])              # stub
     with pytest.raises(ValueError):
         R.resolve("verl", ["ticket_admission"])        # slime only
     with pytest.raises(ValueError):

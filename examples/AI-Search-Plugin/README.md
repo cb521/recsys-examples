@@ -79,41 +79,34 @@ Two easy mistakes in any multi-turn tool-using RL: pass **token IDs** between tu
 
 ## 3. Components
 
-All components are opt-in. Switches and defaults: [docs/COMPONENTS.md](docs/COMPONENTS.md), or `ai-search-plugin list`. *Stub* = registered but not ported yet ([docs/PORTING.md](docs/PORTING.md)).
+★ = on in the default set; the rest are opt-in. "Measured effect" is how much slower things got with the component removed from our full set: × above 1 or + means it helps, ✓ = statistically significant. Per-component numbers, switches, and whether a baseline can get the same by its own config: [docs/COMPONENTS.md](docs/COMPONENTS.md).
 
-**Reading the effect column.** Leave-one-out from our full set, same node, both orders. Small models: ratio (above 1 = helps). Qwen3-Next: % gain. ✓ = significant at 95%; n.s. = not significant; *not active* = the component never ran there, so no conclusion. SR1 = Search-R1, ASR = ASearcher, Q3N = Qwen3-Next. Measured with the original implementation; current defaults differ slightly (e.g. `ws direct` is off).
-
-### Model-agnostic
-
-| Component | What it does | Measured effect | Baseline can get it by config? |
+| Problem | Component | What it does | Measured effect |
 |---|---|---|---|
-| `ticket_admission` (slime) | Bounds staleness without capping concurrency. DEFER moves slow groups to a later batch; a budgeted cut drops stragglers. | DEFER: ASR ×1.333 ✓; Q3N +0.38% n.s. Ticket itself: SR1·slime ×0.996 n.s.; Q3N −2.32% ✓ (off is faster and still compliant); ASR has no compliant run without it. | No. verl drops stale samples instead. |
-| `verl_ceiling` (verl) | The same staleness ceiling, in verl's units | SR1·verl ×1.000 n.s. (never triggered) | Yes |
-| `pool_fill` (slime) | Keeps every engine full within the ceiling | Not ablated | No |
-| `rshard` (slime) | Shards the rollout client over processes | ASR ×1.051 n.s. (`--use-distributed-post` on in both arms); Libra n.s. | Partly: `--use-distributed-post` covers LLM requests, not tool calls |
-| `toolcache` + `tool_hedge` | Merges identical concurrent tool calls; sends a backup request for slow ones | ASR ×1.079 n.s.; Libra n.s.; SR1·verl not active (a positional-argument call bypassed the cache) | No |
-| `sampler_nosync` + `fastload` ("engine hooks") | Removes SGLang's per-step GPU→CPU sync; faster weight loading in the engine | ASR ×1.116 ✓; Libra ×1.151 ✓; SR1 n.s.; Q3N n.s. | No |
-| `weight_sync` (+ `verl_inplace`) | Faster weight push: buckets, pipelined send, parallel PP stages | n.s. everywhere (Q3N +1.2%, one order only) | Partly: slime baselines got the same 2 GB buffer; verl already buckets |
-| `prefetch` (slime) | Overlaps rollout-data fetch with weight sync; prebuilds the next batch | SR1·slime ×1.033 ✓; ASR ×1.066 (weak ✓); Libra n.s.; Q3N +13.51% ✓ (with `r3_transfer`) | No |
-| `response_logits` | LM head, log-prob and entropy only on response tokens, chunked | SR1·slime ×1.116 ✓; ASR ×1.090 ✓; Libra n.s.; Q3N n.s. | No. verl's fused kernel saves memory but still computes every row |
-| `kvepoch` / `kvfresh` / `verl_kvfresh` | Correctness: after a sync, no request reuses prefix KV from old weights | Cost n.s. (SR1·verl ×0.993; Libra vs. prefix cache off ×1.065) | Partly: flush or disable the prefix cache |
-| `jitcache` | Keeps Triton compile and autotune results across runs | Not ablated | Mostly |
-| `prefix_tree` (stub) | Trains a group's shared prompt once | Not measured | — |
+| **Less waiting for data** | `ticket_admission` ★ (slime), `verl_ceiling` ★ (verl) | Caps how stale a sample can be without lowering concurrency; moves slow groups to a later batch (DEFER) | DEFER: ASearcher ×1.333 ✓. Ticket itself was 2.3% slower on Qwen3-Next |
+| | `pool_fill` ★ | Keeps every inference engine filled with in-flight requests | Not measured separately |
+| | `prefetch` ★ | Fetches the next batch while weights are being synced | Search-R1 ×1.033 ✓; Qwen3-Next +13.5% ✓ |
+| | `rshard` ★ | Splits the rollout client that sends requests over several processes | ASearcher ×1.051, not significant |
+| **Faster search** | `toolcache` ★ + `tool_hedge` ★ | Sends identical searches once; sends a backup when a search is slow | ASearcher ×1.079, not significant |
+| **Less compute** | `response_logits` ★ | Computes the output layer only on model-written tokens | Search-R1 ×1.116 ✓; ASearcher ×1.090 ✓ |
+| | `prefix_tree` | Computes the shared prompt of a group's answers once | Not in the measured configs |
+| **Weight sync** | `sampler_nosync` ★ + engine-side fast load | Removes a per-step wait in the inference engine; loads new weights faster | ASearcher ×1.116 ✓; Libra ×1.151 ✓ |
+| | `weight_sync` ★ (+ `verl_inplace` ★) | Pushes new weights to the inference engines faster | Not significant anywhere (~1%) |
+| | `kvepoch` / `kvfresh` / `verl_kvfresh` | After a weight update, never reuses caches computed with old weights (correctness) | Cost not significant |
+| **MoE only** | `expert_placement` | Moves busy experts to idle GPUs when load is uneven | Qwen3-Next +2.7% ✓ |
+| | `r3_ep_plan` | Plans a whole step's MoE communication before training, so layers stop pausing to sync | Not in the measured configs |
+| | `hybridep_overlap` | Overlaps MoE communication with compute in two chunks (cannot be combined with the previous one) | Not in the measured configs |
+| | `r3_transfer` ★ | Compresses routing-replay data before sending it | Measured together with prefetch (above) |
+| | `r3pack` | Balances expert load when packing micro-batches | Did not trigger on Qwen3-Next |
+| | `jitfix` ★ | Stops torch.compile from recompiling on every new length | Not measured separately |
+| **Other** | `jitcache` | Keeps compiled kernels across runs, saving first-step compile time | Not measured separately |
 
-### Model-family
+The direct-HTTP path of `weight_sync` (`ws direct`) is off by default: it caused rare hangs on the 80B model (1 in 60 syncs); root cause not confirmed.
 
-| Component | Family | What it does | Measured effect | Baseline by config? |
-|---|---|---|---|---|
-| `expert_placement` (stub) | MoE | Moves experts across EP ranks to even out load | Q3N +2.70% ✓ (code not in this package yet) | No |
-| `r3_transfer` | MoE + routing replay | Sends routed-expert ids in compact form | Only measured as part of prefetch | No |
-| `r3pack` | MoE + routing replay | Balances expert load when packing micro-batches | Not active on Q3N (turned itself off) | No |
-| `jitfix` | MoE / GDN | Prevents torch.compile recompile storms | Not ablated | No |
-| `mtp_draft_loader` (stub) | MTP | MTP speculative decoding in rollout | Q3N: slower in both tries (−3.4%; −1.6% n.s.); kept off | — |
-| `dsa_replay`, `r3_ep_plan`, `hybridep_overlap`, `gdn_cudnn`, `fla_nb_bucket`, `gdn_convfuse_ep` (stubs) | DSA / MoE / GDN | See COMPONENTS.md | Not measured (`gdn_cudnn` was slower than FLA in an earlier test) | — |
-
-`ws direct` (the direct-HTTP path of `weight_sync`) is **off by default**: it caused rare hangs on the 80B model (1 in 60 syncs); root cause not confirmed.
+Five more components are registered by name but have no code yet (MTP speculative decoding, DSA selection replay, three GDN items); see [docs/PORTING.md](docs/PORTING.md).
 
 ---
+
 
 ## 4. Performance: speed-ups and where time goes
 
@@ -202,6 +195,6 @@ Launch examples (illustrative, not run in tests):
 - [examples/slime/](examples/slime/): needs slime's fully-async rollout mode; start the trainer with `python -m ai_search_plugin.adapters.slime_train` so `prefetch` works.
 - [examples/verl/](examples/verl/): uses `VERL_USE_EXTERNAL_MODULES`; `response_logits` needs the Megatron engine.
 
-**Tested:** `pytest tests/` on a CPU-only machine without any framework: registry, CLI, hooks and the CPU logic of each ported component. 80 passed, 2 skipped (need a slime checkout via `SLIME_SRC`).
+**Tested:** `pytest tests/` on a CPU-only machine without any framework: registry, CLI, hooks and the CPU logic of each ported component. 244 passed, 2 skipped (need a slime checkout via `SLIME_SRC`).
 
-**Not tested:** real slime/verl runs, SGLang engine patches, NCCL weight transfer, `rshard`'s Ray integration, and the `response_logits` GPU tests in `tests/gpu/`. See [docs/COMPONENTS.md](docs/COMPONENTS.md#what-is-tested-here-cpu-only-no-gpu-no-framework-installed).
+**Not tested:** real slime/verl runs, SGLang engine patches, NCCL weight transfer, `rshard`'s Ray integration, the `response_logits` GPU tests in `tests/gpu/`, and the GPU paths of the four newly ported components (`prefix_tree`, `expert_placement`, `r3_ep_plan`, `hybridep_overlap`). See [docs/COMPONENTS.md](docs/COMPONENTS.md#what-is-tested-here-cpu-only-no-gpu-no-framework-installed).

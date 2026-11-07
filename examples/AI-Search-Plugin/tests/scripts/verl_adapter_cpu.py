@@ -1,6 +1,6 @@
 """CPU test of ai_search_plugin.adapters.verl against fake verl modules with the same names and signatures as verl
 main (2026-10). Inside a verl container (real verl importable: VERL_REAL=1) the balance part runs against the real
-verl.utils.seqlen_balancing.  (The expert-placement part of the original test is not ported: placement is a stub.)
+verl.utils.seqlen_balancing.  (Expert placement has its own tests: cpu/test_verl_placement_cpu.py.)
 Run: python3 tests/scripts/verl_adapter_cpu.py"""
 import asyncio
 import json

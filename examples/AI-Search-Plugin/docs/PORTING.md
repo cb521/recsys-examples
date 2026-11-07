@@ -27,7 +27,7 @@ What changed in the port (behaviour of the shipped components is otherwise uncha
    `ai_search_plugin.verl_plugin`.
 2. **No C++ extension**: asrt could use a C++ tool cache / partitioner / router; the plugin ships only the pure-Python
    tool cache and partitioner (`toolcache_py`, `partition_py`).  `ExpertPlacementHook` and the C++ cost router
-   (`verl.pick_server`) were dropped with it (expert placement is a stub; the verl `route` feature uses its own
+   (`verl.pick_server`) were dropped with it (expert placement now uses the pure-Python `placement_py`; the verl `route` feature uses its own
    pure-Python picker).
 3. **Deprecated components removed** (tried, no measured gain): out-of-order batch assembly (`ASRT_STALE_MODE=ooo`,
    `OooTickets` class), straggler slip (`ASRT_TICKET_SLIP`, now a no-op), slow-tool cut (`ASRT_TICKET_SLOWTOOL_S`,
@@ -70,24 +70,27 @@ stand-alone feature; `verl_inplace` turns it on), `tokcache`, `balance`, `profil
 by `verl_ceiling`'s tests).  They can be enabled by hand through `ASRT_VERL=<list>`; registering one = adding a
 `Component(...)` entry.
 
+
+### Ported later (11-07): `expert_placement`, `prefix_tree`, `r3_ep_plan`, `hybridep_overlap`
+
+CPU-tested only; the GPU paths were reviewed but not run in this repository.
+
+| plugin module | source |
+|---|---|
+| `placement_py.py`, `adapters/{megatron,slime,verl}_placement.py`, `adapters/place_verify.py` | branch `exp/e2e-phase4-20261026`, `asrt/placement_py.py`, `asrt/adapters/<same name>` |
+| `prefix_tree/` (`plan`, `model`, `adapters/{slime,slime_pack,verl,verl_driver}`, `verl_plugin`) | branch `exp/innov1-prefix-tree-20261102` @ `203da907`, `components/prefix_tree/` |
+| `r3plan.py`, `adapters/{megatron,slime}_r3plan.py` | branch `exp/innov2-r3plan-20261102`, `components/ep_dispatch/r3_plan_a2a.py` |
+| `adapters/{megatron,slime}_hybridep.py` | branch `exp/train-perf-r10-merge` @ `93feed33`, `components/ep_dispatch/{__init__,overlap}.py` |
+
+What changed:
+- `expert_placement`: planner without numpy (same algorithm, checked against the numpy version on random inputs); hot-expert replication and model-specific exporter markers removed. Not valid with group-limited routing (`moe_router_num_groups`), which is not checked yet.
+- `prefix_tree`: model-specific sparse-attention / PLE / cuDNN-GDN paths removed; the RoPE mode is now an explicit argument (the source inferred it from a tensor length, which can collide under CP>=2); silent fallbacks in the GDN state path and the verl packer now raise. The earlier per-token log-prob difference vs the flat path (dense model, CP2) comes from bf16 rounding: under CP>=2 each sample is zigzag-split by its own length, while the tree reuses sibling 0's prompt for all siblings (bit-exact at CP1; ~1e-5 in fp32). Checked for the forward pass only.
+- `r3_ep_plan`: patches Megatron's alltoall dispatcher (`preprocess`) from a slime init hook instead of the source's own trainer. Default on mismatch is warn + fall back to Megatron's path (source: raise; `ASRT_R3PLAN_STRICT=1` restores it). The first step is verified exactly. The HybridEP version and the recompute metadata cache were not ported. An unexplained grad-norm spike seen once in the source is not ruled out.
+- `hybridep_overlap`: only the HybridEP chunked path; Megatron args are written in the init hook; version gate (overlap patch only on Megatron-Core 0.19) with `auto` fallback (plain HybridEP dispatch, or alltoall when HybridEP is missing). verl is not wired.
+
 ## Stubs (not ported)
 
 Each has a registry entry and a module in `src/ai_search_plugin/stubs/` whose `install()` raises `NotPortedError`.
-
-### `prefix_tree` (model-agnostic, Megatron backend)
-- Source: branch `exp/innov1-prefix-tree-20261102`, `components/prefix_tree/` (training-side tree packing,
-  `verl_driver` keeps a GRPO group on one DP rank, `verl_adapter`), wired through `components/train_perf_plugins/`.
-- Left: port the packing + attention-mask / position-id construction for Megatron; slime adapter and verl driver +
-  adapter; GPU equivalence tests (loss / grads vs the flat path).  Open item in the source: the root cause of a
-  measured per-token log-prob difference vs the flat path on one dense model is not established - verify before
-  shipping.
-
-### `r3_ep_plan` (MoE with R3)
-- Source: branch `exp/innov2-r3plan-20261102`, `components/ep_dispatch/r3_plan_a2a.py` (+ `overlap.py`,
-  `recompute_cache.py`, `test_r3plan.py`), driven from `scripts/hybrid_train.py` (`TP_MOE_R3_PLAN`).
-- Left: make it a Megatron MoE dispatcher patch usable from slime (the source runs it inside its own hybrid trainer;
-  slime's all-to-all path is not default there); runtime guard (per-step plan-vs-actual mismatch check) must come
-  with it.  Validated layouts in the source: PP1, PP2/VPP2 (smoke), PP4/VPP3; other layouts rely on the guard.
 
 ### `mtp_draft_loader` (models with an MTP head)
 - Source: branch `exp/e2e-phase4-20261026`, slime launch configuration (not code in the asrt package): SGLang
@@ -101,18 +104,6 @@ Each has a registry entry and a module in `src/ai_search_plugin/stubs/` whose `i
   `rollout`, `slime_rollout`, `slime_train`) with CPU tests `test_dsa_replay_cpu.py`, `test_dsa_replay_hook_cpu.py`.
 - Left: the rollout-side capture needs SGLang to expose the per-token top-k selection (not available in the tested
   SGLang); never run end to end.  The codec/store are pure Python and could be ported first.
-
-### `expert_placement` (MoE)
-- Source: branch `exp/e2e-phase4-20261026`, `asrt/adapters/megatron_placement.py`, `slime_placement.py`,
-  `verl_placement.py`, `place_verify.py`, `asrt/placement_py.py`; CPU tests `test_placement_cpu.py`,
-  `test_place_*_cpu.py`, `test_slime_placement_cpu.py`.
-- Left: the planner used the C++ extension (`solvers.plan_placement`); needs the pure-Python planner wired in
-  (`placement_py` has `imbalance` / `rebalance_swaps`).  Auto-off when imbalance is low must be kept.
-
-### `hybridep_overlap` (MoE)
-- Source: train-perf line, `components/ep_dispatch/` (`--tp-moe-dispatcher hybridep --tp-moe-ep-overlap 2`);
-  HybridEP itself is Megatron's flex dispatcher backend (needs a Megatron overlay build in the source setup).
-- Left: express it as Megatron arguments + the 2-chunk overlap patch for slime; not wired for verl.
 
 ### `gdn_cudnn` (GDN; slime only)
 - Source: branch `exp/train-perf-r10-merge`, `kernels/gdn_cudnn/`; loader overlay `asrt/adapters/gdn_overlay.py`

@@ -79,41 +79,34 @@ AI 搜属于"多轮调工具"的 RL 训练，和代码智能体、多轮游戏�
 
 ## 3. 组件
 
-所有组件都需手动开启。开关和默认值见 [docs/COMPONENTS.md](docs/COMPONENTS.md)，或运行 `ai-search-plugin list`。*空壳（stub）* = 已登记但代码还没移植（[docs/PORTING.md](docs/PORTING.md)）。
+★ = 默认组合里开着，其余要手动打开。"实测效果"是从全套里去掉这个组件后慢了多少：× 大于 1 或 + 表示有用，✓ = 统计上显著。逐项的详细数字、开关，以及对手改自己的配置能不能拿到，见 [docs/COMPONENTS.md](docs/COMPONENTS.md)。
 
-**效果列怎么看。** 从我们的全套里去掉一个组件对比，同节点、正反两序。小模型给比值（大于 1 = 有用），Qwen3-Next 给百分比收益。✓ = 95% 显著；n.s. = 不显著；*没生效* = 组件在那里根本没运行，不能下结论。SR1 = Search-R1，ASR = ASearcher，Q3N = Qwen3-Next。数字来自原始实现，当前默认配置略有不同（如 `ws direct` 已关）。
-
-### 与模型无关
-
-| 组件 | 做什么 | 实测效果 | 基线改配置能拿到吗？ |
+| 解决什么 | 组件 | 干什么 | 实测效果 |
 |---|---|---|---|
-| `ticket_admission`（slime） | 不压并发也能守住陈旧度上限。DEFER 把慢组挪到后面的批次，按预算截掉掉队样本。 | DEFER：ASR ×1.333 ✓；Q3N +0.38% n.s.。ticket 本身：SR1·slime ×0.996 n.s.；Q3N −2.32% ✓（关掉更快且仍合规）；ASR 没有它就没有合规的 run 可比。 | 不能。verl 是丢掉陈旧样本。 |
-| `verl_ceiling`（verl） | 同样的陈旧度上限，用 verl 的单位 | SR1·verl ×1.000 n.s.（从未触发） | 能 |
-| `pool_fill`（slime） | 在上限内让每个引擎都满载 | 没单独消融 | 不能 |
-| `rshard`（slime） | 把 rollout 客户端拆到多个进程 | ASR ×1.051 n.s.（两边都开了 `--use-distributed-post`）；Libra n.s. | 部分能：`--use-distributed-post` 管 LLM 请求，不管工具调用 |
-| `toolcache` + `tool_hedge` | 相同的并发工具调用合并成一次；慢调用补发备份请求 | ASR ×1.079 n.s.；Libra n.s.；SR1·verl 没生效（按位置参数调用绕过了缓存） | 不能 |
-| `sampler_nosync` + `fastload`（"引擎钩子"） | 去掉 SGLang 每步的 GPU→CPU 同步；引擎内加载权重更快 | ASR ×1.116 ✓；Libra ×1.151 ✓；SR1 n.s.；Q3N n.s. | 不能 |
-| `weight_sync`（+ `verl_inplace`） | 权重推送更快：分桶、流水线发送、PP 各段并行 | 全部 n.s.（Q3N +1.2%，只测单序） | 部分能：slime 基线也给了 2 GB 缓冲；verl 本来就分桶 |
-| `prefetch`（slime） | 取 rollout 数据与权重同步重叠；提前构建下一批 | SR1·slime ×1.033 ✓；ASR ×1.066（弱 ✓）；Libra n.s.；Q3N +13.51% ✓（与 `r3_transfer` 一起） | 不能 |
-| `response_logits` | 只在回答 token 上分块算 LM head、log-prob 和熵 | SR1·slime ×1.116 ✓；ASR ×1.090 ✓；Libra n.s.；Q3N n.s. | 不能。verl 的融合 kernel 省显存，但仍算所有行 |
-| `kvepoch` / `kvfresh` / `verl_kvfresh` | 正确性：同步后不复用旧权重算出的前缀 KV | 开销不显著（SR1·verl ×0.993；Libra 对比关前缀缓存 ×1.065） | 部分能：清空或关掉前缀缓存 |
-| `jitcache` | 跨 run 保留 Triton 编译和 autotune 结果 | 没消融 | 基本能 |
-| `prefix_tree`（空壳） | 一组共享的提示只训一次 | 没测 | — |
+| **少等数据** | `ticket_admission` ★（slime）、`verl_ceiling` ★（verl） | 限制样本最多旧几步，但不靠压低并发；慢的组挪到后面的批次（DEFER） | DEFER：ASearcher ×1.333 ✓。ticket 本身在 Qwen3-Next 上反而慢 2.3% |
+| | `pool_fill` ★ | 在途请求始终补满每个推理引擎 | 没单独测 |
+| | `prefetch` ★ | 同步权重的同时，把下一批数据先取好 | Search-R1 ×1.033 ✓；Qwen3-Next +13.5% ✓ |
+| | `rshard` ★ | 把发请求的 rollout 客户端拆到多个进程 | ASearcher ×1.051，不显著 |
+| **搜索更快** | `toolcache` ★ + `tool_hedge` ★ | 同样的搜索只发一次；搜得慢就补发一份 | ASearcher ×1.079，不显著 |
+| **少算** | `response_logits` ★ | 只在模型自己写的部分算最后一层输出 | Search-R1 ×1.116 ✓；ASearcher ×1.090 ✓ |
+| | `prefix_tree` | 同一道题的几个回答，开头只算一次 | 不在测速配置里 |
+| **权重同步** | `sampler_nosync` ★ + 引擎侧快速加载 | 去掉推理引擎每步一次的等待；更快加载新权重 | ASearcher ×1.116 ✓；Libra ×1.151 ✓ |
+| | `weight_sync` ★（+ `verl_inplace` ★） | 更快把新权重推给推理引擎 | 都不显著（约 1%） |
+| | `kvepoch` / `kvfresh` / `verl_kvfresh` | 权重更新后不再用旧权重算的缓存，保证结果对 | 开销不显著 |
+| **MoE 专用** | `expert_placement` | 专家忙闲不均时，把忙的专家挪到闲的卡上 | Qwen3-Next +2.7% ✓ |
+| | `r3_ep_plan` | 训练前一次排好整步的 MoE 通信，每层不再停下来同步 | 不在测速配置里 |
+| | `hybridep_overlap` | MoE 发数据和计算分两块同时进行（和上一个不能同开） | 不在测速配置里 |
+| | `r3_transfer` ★ | 路由回放数据压缩后再传 | 和 prefetch 一起测（见上） |
+| | `r3pack` | 拼微批时平衡各专家的负载 | Qwen3-Next 上没触发 |
+| | `jitfix` ★ | 防止 torch.compile 因长度变化反复重编译 | 没单独测 |
+| **其他** | `jitcache` | 跨次运行保留编译结果，省掉第一步的编译时间 | 没单独测 |
 
-### 与模型族相关
+`weight_sync` 里的直连 HTTP 路径（`ws direct`）默认关闭：在 80B 模型上偶发卡死（每 60 次同步 1 次），根因未确认。
 
-| 组件 | 模型族 | 做什么 | 实测效果 | 基线改配置能拿到吗？ |
-|---|---|---|---|---|
-| `expert_placement`（空壳） | MoE | 在 EP rank 间搬专家，均衡负载 | Q3N +2.70% ✓（代码还没进本包） | 不能 |
-| `r3_transfer` | MoE + 路由回放 | 路由专家 id 压缩传输 | 只作为 prefetch 的一部分测过 | 不能 |
-| `r3pack` | MoE + 路由回放 | 拼 micro-batch 时均衡专家负载 | Q3N 上没生效（自动关了） | 不能 |
-| `jitfix` | MoE / GDN | 防止 torch.compile 反复重编译 | 没消融 | 不能 |
-| `mtp_draft_loader`（空壳） | MTP | rollout 中用 MTP 投机解码 | Q3N：两次都更慢（−3.4%；−1.6% n.s.），保持关闭 | — |
-| `dsa_replay`、`r3_ep_plan`、`hybridep_overlap`、`gdn_cudnn`、`fla_nb_bucket`、`gdn_convfuse_ep`（空壳） | DSA / MoE / GDN | 见 COMPONENTS.md | 没测（`gdn_cudnn` 早先测试比 FLA 慢） | — |
-
-`ws direct`（`weight_sync` 的直连 HTTP 路径）**默认关闭**：在 80B 模型上偶发卡死（每 60 次同步 1 次），根因未确认。
+还有 5 个组件只登记了名字、还没有代码（MTP 投机解码、DSA 选块回放、3 个 GDN 相关），见 [docs/PORTING.md](docs/PORTING.md)。
 
 ---
+
 
 ## 4. 效果：快了多少、时间花在哪
 
@@ -202,6 +195,6 @@ print(plan.shell())   # 环境变量 + 框架参数
 - [examples/slime/](examples/slime/)：slime 需用全异步 rollout 模式；训练端用 `python -m ai_search_plugin.adapters.slime_train` 启动，`prefetch` 才能工作。
 - [examples/verl/](examples/verl/)：使用 `VERL_USE_EXTERNAL_MODULES`；`response_logits` 需要 Megatron 引擎。
 
-**测了：** `pytest tests/` 在只有 CPU、没装任何框架的机器上跑，覆盖注册表、CLI、钩子和各已移植组件的 CPU 逻辑。80 个通过，2 个跳过（需通过 `SLIME_SRC` 提供 slime 源码）。
+**测了：** `pytest tests/` 在只有 CPU、没装任何框架的机器上跑，覆盖注册表、CLI、钩子和各已移植组件的 CPU 逻辑。244 个通过，2 个跳过（需通过 `SLIME_SRC` 提供 slime 源码）。
 
-**没测：** 真实 slime/verl 运行、SGLang 引擎补丁、NCCL 权重传输、`rshard` 的 Ray 集成、`tests/gpu/` 里的 `response_logits` GPU 测试。详见 [docs/COMPONENTS.md](docs/COMPONENTS.md#what-is-tested-here-cpu-only-no-gpu-no-framework-installed)。
+**没测：** 真实 slime/verl 运行、SGLang 引擎补丁、NCCL 权重传输、`rshard` 的 Ray 集成、`tests/gpu/` 里的 `response_logits` GPU 测试，以及新搬进来的 4 个组件（`prefix_tree`、`expert_placement`、`r3_ep_plan`、`hybridep_overlap`）的 GPU 部分。详见 [docs/COMPONENTS.md](docs/COMPONENTS.md#what-is-tested-here-cpu-only-no-gpu-no-framework-installed)。

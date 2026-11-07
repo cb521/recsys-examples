@@ -30,7 +30,8 @@ Features (each also callable directly from Python):
              Mode ASRT_VERL_BALANCE=best (default) runs verl's Karmarkar-Karp
              and asrt's LPT+swap and keeps the lower max load (never worse);
              'asrt' always uses ours.
-  place      Megatron backend only: expert re-placement - NOT ported yet (stub, see docs/PORTING.md).
+  place      Megatron backend only: expert re-placement from R3 routing counts (verl_placement); skips itself
+             when the EP-rank imbalance is below ASRT_PLACE_MIN_IMB (1.15) and on dense models.
   response_logits  Megatron backend only: output layer on response rows only (ai_search_plugin.response_logits).
   route      prefix/group-affinity cost routing of new requests (verl_rollout / verl_route).
   keepkv     keep SGLang KV + prefix cache across weight syncs (verl_rollout).
@@ -475,9 +476,10 @@ def _install_one(f):
         elif f == "balance":
             q = float(os.environ.get("ASRT_VERL_QUAD", 0.0))
             install_balanced_partitions(q)
-        elif f == "place":
-            raise NotImplementedError("expert placement is not ported to ai_search_plugin yet "
-                                      "(see ai_search_plugin.stubs.expert_placement / docs/PORTING.md)")
+        elif f == "place":  # expert re-placement (verl_placement; Megatron engine, MoE only, auto-off when balanced)
+            from .verl_placement import install as install_place
+            install_place()
+            _INSTALLED.add(f)
         elif f == "sglhooks":
             from .verl_engine import install_sglhooks
             install_sglhooks()

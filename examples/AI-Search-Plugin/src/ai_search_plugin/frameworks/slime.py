@@ -106,6 +106,20 @@ def plan(components="default", options: Optional[dict] = None) -> Plan:
     if on("jitcache"):
         env["ASRT_JITCACHE_DIR"] = str(jdir)
         chain.append(A + "jitcache.megatron_init")
+    if on("expert_placement"):
+        chain.append(A + "slime_placement.megatron_init")
+    if on("r3_ep_plan"):
+        chain.append(A + "slime_r3plan.megatron_init")
+    if on("prefix_tree"):
+        env["ASRT_PREFIX_TREE"] = "1"
+        chain.append("ai_search_plugin.prefix_tree.adapters.slime.megatron_init")
+    if on("hybridep_overlap"):
+        from ..adapters import slime_hybridep
+        frag = slime_hybridep.plan_fragment(o)
+        env.update(frag["env"])
+        p.args += frag["args"]
+        chain += frag["chain"]
+        p.notes += frag["notes"]
     if o.get("chain_megatron_init"):
         chain.append(str(o["chain_megatron_init"]))
     if chain:
@@ -141,6 +155,9 @@ def plan(components="default", options: Optional[dict] = None) -> Plan:
         env["ASRT_RS"] = "auto,profile"
         env["ASRT_RS_INNER"] = fn
         fn = A + "slime_rshard.generate_rollout_fully_async"
+    if on("prefix_tree"):
+        env["PREFIX_TREE_ROLLOUT_INNER"] = fn
+        fn = "ai_search_plugin.prefix_tree.adapters.slime_pack.generate_rollout_fully_async"
     if fn != STOCK_ROLLOUT:
         p.args += ["--rollout-function-path", fn]
         p.notes.append("the rollout chain ends in slime's stock fully-async rollout (needs slime's fully-async mode); "
