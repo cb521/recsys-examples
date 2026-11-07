@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 [English](bottlenecks.md) | 中文
 
-这是 [README](../README.zh-CN.md) 第二部分背后的细节。
+这是 [README](../README.zh-CN.md) 第 1 节背后的细节。
 每类瓶颈列三项：时间花在哪、公开证据、我们的实测。公开数字只代表那家公司的那个场景，原样引用，不能当成通用占比（标"厂商"的是厂商对自家产品的自测）。我们的数字来自本仓库的实测（见 benchmarks；条件见文首）。"未测"就是没测，不作任何说法。
 
 ## 序列化 / 算子间记录复制

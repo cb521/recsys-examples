@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 [English](related-work.md) | 中文
 
-这是 [README](../README.zh-CN.md) 第一部分背后的细节和流程图。资料来自公开的代码、文档和博客，读于 2026 年 11 月；没能确认的地方标成**未核实**。
+这是 [README](../README.zh-CN.md) 第 6 节背后的细节和流程图。资料来自公开的代码、文档和博客，读于 2026 年 11 月；没能确认的地方标成**未核实**。
 
 ## Mega-Flink（GPU）
 

@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 English | [中文](bottlenecks.zh-CN.md)
 
-Details behind Part 2 of the [README](../README.md).
+Details behind section 1 of the [README](../README.md).
 For each bottleneck class: where time goes, public evidence, and our measurement. Public numbers belong to one company and one scenario each; they are quoted as published and are not general percentages ("vendor" = the vendor measured its own product). Our numbers come from this repo's benchmarks (see benchmarks; conditions at the top). "Not measured" means we claim nothing.
 
 ## Serialization and copying between operators

@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 English | [中文](related-work.zh-CN.md)
 
-Details and flow diagrams behind Part 1 of the [README](../README.md). Sources are public code, documentation and blog posts, read in November 2026; unconfirmed details are marked **unverified**.
+Details and flow diagrams behind section 6 of the [README](../README.md). Sources are public code, documentation and blog posts, read in November 2026; unconfirmed details are marked **unverified**.
 
 ## Mega-Flink (GPU)
 
