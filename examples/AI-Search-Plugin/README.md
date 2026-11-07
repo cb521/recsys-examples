@@ -50,21 +50,25 @@ Only model-written tokens are in the loss, but every token still goes through ev
 
 ---
 
-## 2. How it differs from single-turn RL
+## 2. How it differs from mainstream RL post-training
 
-Most of these also apply to other multi-turn agent RL; AI search is the extreme case.
+A qualitative comparison, not measured.
 
-| | Single-turn math / code | AI search | Impact on the system |
-|---|---|---|---|
-| **Who writes the tokens** | The model | Mostly the search tool (long documents) | Inference is prefill-heavy; most training compute goes to tokens outside the loss |
-| **Shared context** | Short prompt | Long prompt shared by all n answers of a group | Prefix sharing pays off much more |
-| **What slows a batch** | Long generations | Slow tools; questions that need many rounds | Needs async rollout with a staleness bound |
-| **Bottleneck** | GPU | Often CPU and scheduling: many small, bursty requests | The control plane saturates before the GPU |
-| **Sample lifetime** | One policy version | Weights can change mid-trajectory | Cached prefixes go stale; MoE routing and sparse-attention choices can differ between inference and training |
+| | RLHF (preference alignment) | Reasoning RL (math / code, RLVR) | Coding-agent RL (SWE-style) | AI-search RL |
+|---|---|---|---|---|
+| **Reward** | Reward model score | Rule check (answer match, unit tests) | Run the tests | Answer match (EM / F1) or LLM judge |
+| **One trajectory** | Single turn, short answer | Single turn, very long chain of thought | Multi-turn: edit code, run commands | Multi-turn: search → read → search again |
+| **Who writes the tokens** | The model | The model | Model + tool output (code, logs) | Mostly retrieved documents |
+| **External environment** | None | None (or a grader) | Sandbox, heavy per call | Retrieval service, many light calls |
+| **What is slow** | Several models (actor / critic / reward / reference) run in turn | A few very long generations hold up the batch | Sandbox execution, environment start-up | Scheduling many small requests (CPU), tool tail latency, prefill of long documents |
+| **What the system needs** | Multi-model scheduling | Async and load balancing for long generations | Environment pools, sandbox scheduling | Async with a staleness bound, a scalable rollout client, logits on response tokens only, prefix-KV invalidation after weight updates |
+
+AI search is closest to coding agents (multi-turn + tools). The difference: search calls are many and light and return long text, so the bottleneck sits in scheduling and prefill rather than in the tool itself.
 
 Two easy mistakes in any multi-turn RL: pass **token IDs** between turns (re-tokenizing breaks training), and mask retrieved tokens out of the loss.
 
 ---
+
 
 ## 3. Bottlenecks: small dense vs. large MoE
 
