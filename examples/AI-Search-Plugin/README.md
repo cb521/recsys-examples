@@ -6,7 +6,7 @@ Drop-in components that make **RL post-training of search agents** (AI search / 
 
 > Early release for review. The speed-ups below were measured with the original implementation this package was ported from. Some components are still stubs, and the tests here are CPU-only. Per-run details: [EXPERIMENTS.md](EXPERIMENTS.md).
 
-On five workloads against each framework's fastest config: 1.17–1.56× faster on four, a tie on one. See [section 5](#5-results).
+On five workloads against each framework's fastest config: 1.17–1.56× faster on four, a tie on one. See [section 4](#4-performance-speed-ups-and-where-time-goes).
 
 ---
 
@@ -54,57 +54,30 @@ Only model-written tokens are in the loss, but every token still goes through ev
 
 AI-search RL is multi-turn, tool-using RL, the same family as coding agents and multi-turn games: the model writes, calls a tool, the result is appended to the context, and it writes again until it answers. The hard parts are broadly shared across this family; how much each one matters depends on the task.
 
-Below are hard scenarios that can show up in industry. We built a synthetic version of each to see where each component should matter; only *f1* (the Qwen3-Next run) has reported numbers (see section 5).
+Below are hard scenarios that can show up in industry. We built a synthetic version of each to see where each component should matter; only *f1* (the Qwen3-Next run) has reported numbers (see section 4).
 
-| | Scenario | Why it hurts | Components |
-|---|---|---|---|
-| a | Single turn, very long prompt | Almost no token is in the loss, yet all go through every layer | `response_logits`, `prefix_tree` (stub) |
-| b | Multi-turn retrieval | Many small, bursty requests; prefix KV goes stale after syncs | `rshard`, `toolcache`, `prefetch`, `kvepoch` / `kvfresh` |
-| c | A few slow trajectories hold up the batch (uneven questions, extreme outliers, bimodal answer lengths) | The step waits for the last one; tail decode batches shrink to a few sequences; drop-based staleness control loses them | `ticket_admission`, `pool_fill`, `verl_ceiling` |
-| d | 100k+ token trajectories | Full-vocabulary logits spike memory; long prefill | `response_logits` |
-| e | Easy/hard mix that drifts during training | A fixed in-flight amount is wrong half the time | `ticket_admission`, `pool_fill`, `prefetch` |
-| f | Tool jitter, timeouts, failures | The tool tail becomes the trajectory tail | `toolcache`, `tool_hedge`, `rshard` |
-| g | Mixed tools (search, long page fetch, slow sandboxed code) | Long returns add prefill; the sandbox queues; caching cannot help unique code calls | `toolcache` (search/fetch), `rshard`, `kvepoch` / `kvfresh` |
-| h | Thousands of in-flight trajectories | The control plane saturates before the GPU | `rshard`, `pool_fill`, `toolcache` |
-| i | An engine or node dies mid-run | Lost work, slow restart | `jitcache` only (no failover yet) |
-| j | Hot MoE experts | The busiest EP rank sets the pace | `expert_placement` (stub), `r3pack` |
-| k | Different training : rollout GPU ratios | The optimum moves; more engines make sync costlier | `weight_sync`, `prefetch` |
-| l | Larger GRPO groups (e.g. n = 16) | A group waits for its slowest member; the shared prefix repeats n times | `prefix_tree` (stub), `toolcache`, `kvepoch` |
-| m | Long single-turn mixed with multi-turn | Unbalanced micro-batches; prefill and decode interfere | None (relies on the framework's dynamic batching) |
-| n | Slow reward / LLM judge | Reward time adds to the step | None yet |
+| | Scenario | Why it hurts |
+|---|---|---|
+| a | One turn, but a very long question | Almost nothing is in the loss, yet every layer computes it all |
+| b | Multi-turn search, many rounds | Many small requests; caches go stale after each weight update |
+| c | A few very slow trajectories hold up the batch (uneven questions, extreme outliers, very short vs. very long answers) | Every step waits for the last one while other GPUs idle; frameworks that control staleness by dropping samples lose the slow ones |
+| d | Very long trajectories (100k+ tokens) | Memory blows up; reading the input is slow |
+| e | Easy and hard questions mixed, and the mix keeps changing | When questions get harder, data runs short; when easier, training can't keep up |
+| f | Unstable search service: slow at times, timeouts, errors | One slow search slows the whole trajectory; retries pile up |
+| g | Several tools mixed: search, opening web pages, running code | Web pages are long; code runs queue up; code results can't be reused |
+| h | Very high concurrency (thousands at once) | The request-sending side saturates first while GPUs idle |
+| i | A machine dies mid-training | Half-done work is lost and restart is slow |
+| j | A few MoE experts are much busier than the rest | The busiest GPU sets the pace |
+| k | Different training-to-rollout GPU ratios | The best ratio shifts; more rollout GPUs make weight sync costlier |
+| l | More answers per question (e.g. 16) | A group waits for its slowest answer; the same prompt is recomputed |
+| m | Long single-turn and multi-turn questions mixed | Uneven batch sizes; reading and generating interfere |
+| n | Slow scoring, e.g. another LLM as judge | Scoring time adds straight to every step |
 
 Two easy mistakes in any multi-turn tool-using RL: pass **token IDs** between turns (re-tokenizing breaks training), and mask tool output out of the loss.
 
 ---
 
-## 3. Bottlenecks: small dense vs. large MoE
-
-Measured per-stage splits for specific workloads, not general rules. Stages: **waiting** for data (includes tool calls), **training** (forward + backward + optimizer), weight **sync**.
-
-### Small dense models (Qwen2.5-7B, Qwen3-14B; one node)
-
-- **Where time goes** depends on the workload.
-  - ASearcher, slime baseline (before `--use-distributed-post`): 25.57 s/Mtok = training 14.64 + waiting 10.94. Ours: 15.86 = 13.60 + 2.26. Waiting is 89% of the gap (reviewed, one order).
-  - Libra, earlier baseline: 30.4 s/step = training 23.6 + waiting 6.8 + sync 0.8 (not reviewed).
-- **Why the baseline waits (ASearcher): the rollout client's CPU**, not the GPU or the retriever. Calls took p50 1.005 s on the client, while the retriever answered in 0.036 s at only 39 QPS. One asyncio loop sends both LLM and tool requests; that thread ran at ~81% CPU and held the GIL 62% of the time (profiled, not reviewed). Sharding the client over 8 processes (`rshard`) cut per-call time 2.52 → 0.82 s and generation per trajectory 19.5 → 9.6 s (reviewed; across runs).
-- **What helped** (reviewed): Search-R1·slime: response logits ×1.116, prefetch ×1.033. ASearcher: DEFER ×1.333, engine hooks ×1.116, response logits ×1.090. Libra: engine hooks ×1.151. Weight-sync changes: no effect (×1.002, ×0.999).
-- **What the baseline gets by config**: slime's `--use-distributed-post` roughly halves its waiting (10.47 / 9.41 → 5.11 / 5.28 s/Mtok; not reviewed). With it on in both arms, `rshard` adds only ×1.051 (not significant).
-
-### Large MoE model (Qwen3-Next 80B-A3B: MoE + GDN linear attention; 4 nodes)
-
-- **Where time goes**, s/step, ours / verl: waiting 58.75 / 102.63, training 168.70 / 211.33, sync 6.85 / 37.53, preprocess 7.6–9.1 / 1.25; step 227.85 / 352.96. Our sync and preprocess overlap with waiting; verl's run serially. verl's generation varies widely: 0–13 s on short steps, 194–236 s on long ones. (Per-stage split not reviewed; the overall ratio is.)
-- **What helped** (reviewed): prefetch +13.51% (without it, waiting grows ~30 s/step); expert placement +2.70% (training ~4 s/step shorter). verl cannot get either by config: its Megatron path has no expert load balancing.
-
-### Two observations that do not generalize
-
-- **Staleness admission helps only where a plain concurrency cap breaks the bound.** Needed on Libra (otherwise concurrency 8) and ASearcher (no concurrency from 256 down to 64 stayed ≤ 2). No effect on Search-R1·slime (×0.996). Cost 2.32% on Qwen3-Next.
-- **Faster sync does not always matter.** On Qwen3-Next, disabling engine hooks doubled sync time (7.0–7.3 → 14.0–15.0 s/step) but step time did not change, because sync overlaps with waiting (not reviewed).
-
-**Not measured:** prefill vs. decode split; multi-node scale for small models; where prefetch's ~30 s/step comes from; sparse-attention (DSA) models; real retrieval.
-
----
-
-## 4. Components
+## 3. Components
 
 All components are opt-in. Switches and defaults: [docs/COMPONENTS.md](docs/COMPONENTS.md), or `ai-search-plugin list`. *Stub* = registered but not ported yet ([docs/PORTING.md](docs/PORTING.md)).
 
@@ -142,7 +115,11 @@ All components are opt-in. Switches and defaults: [docs/COMPONENTS.md](docs/COMP
 
 ---
 
-## 5. Results
+## 4. Performance: speed-ups and where time goes
+
+Three open-source small models (Search-R1, ASearcher, Libra) and one large model (Qwen3-Next 80B).
+
+### 4.1 Speed-ups
 
 **Speed-up = baseline ÷ ours**, in seconds per million trained tokens (s/Mtok).
 
@@ -164,11 +141,46 @@ All components are opt-in. Switches and defaults: [docs/COMPONENTS.md](docs/COMP
 2. Measured with `ws direct` on. It is now off by default because it caused rare hangs (1 in 60 syncs; verl also hung 1 in 63, cause unknown). Not re-measured; the whole weight-sync group is worth ~1% (not significant).
 3. Measured with ticket admission on. Turning it off here is ~2.3% faster, so 1.560× is conservative.
 4. Our samples were nearly all at staleness 2, verl's ~99.6% at staleness 1 (both within the bound). Part of the gain may come from this; not measured separately.
-5. In the ablations only prefetch (+13.5%) and expert placement (+2.7%) are significant; the rest is not attributed. Do not add or subtract section 3's per-stage numbers to/from the ablations.
+5. In the ablations only prefetch (+13.5%) and expert placement (+2.7%) are significant; the rest is not attributed. Do not add or subtract the per-stage numbers in 4.2–4.3 to/from the ablations.
 6. verl needed three local fixes (not upstreamed) to bring its log-prob gap from 0.210 to 0.016–0.021: a newer SGLang, an adapter shim for it, and the original GDN output-norm weights. Both arms used the same SGLang.
 
----
+### 4.2 Where time goes
 
+Share of each step per stage. "Step total" units: s/Mtok for small models (reviewed), s/step for Qwen3-Next (not reviewed); waiting excludes sync everywhere:
+
+| Comparison | Arm | Training | Waiting | Sync | Other | Step total |
+|---|---|---|---|---|---|---|
+| Search-R1 vs. slime | Baseline | 86% | 14% | 0% | 0% | 18.31 |
+| | Ours | 89% | 10% | 1% | 0% | 15.64 |
+| Search-R1 vs. verl (PPO, training includes the critic) | Baseline | 66% | 17% | 14% | 3% | 47.96 |
+| | Ours | 64% | 19% | 14% | 3% | 47.87 |
+| ASearcher vs. verl | Baseline | 73% | 22% | 4% | 1% | 16.52 |
+| | Ours | 88% | 12% | 1% | 0% | 14.36 |
+| ASearcher vs. slime (reference) | Baseline | 71% | 29% | 0% | 0% | 18.97 |
+| | Ours | 86% | 13% | 0% | 0% | 14.70 |
+| Libra vs. slime | Baseline | 66% | 33% | 2% | 0% | 45.81 |
+| | Ours | 76% | 21% | 3% | 0% | 37.50 |
+| Qwen3-Next vs. verl | Baseline | 60% | 29% | 11% | 0% | 352.96 |
+| | Ours | 74% | 23% | 3% | 0% | 227.85 |
+
+### 4.3 Where small and large models get stuck
+
+| | Small dense models (Search-R1, ASearcher: Qwen2.5-7B; Libra: Qwen3-14B; one node) | Large MoE model (Qwen3-Next 80B-A3B; 4 nodes) |
+|---|---|---|
+| **Where most time goes** | **Training**: 66–86% of each step for baselines, 64–89% for ours. Waiting is about 10–33% | **Training**: 74% for ours (168.70 / 227.85 s/step), 60% for verl (211.33 / 352.96) |
+| **Where we gain** | **Mostly in waiting**: 81% of the gap on ASearcher (vs. slime) and 83% on Libra. Exception: Search-R1·slime, where baseline waiting is already small and 65% of the gain is in training (logits on response tokens only). Against verl: on ASearcher we gain in generation and sync, while our training is slightly slower; on Search-R1 the training gain is cancelled by more generation time, hence the tie | **Both**: training 43 s/step shorter, waiting 44 s/step shorter (our waiting includes 6.9 s of sync; ~51 s shorter without it); verl's 37.5 s sync is added to the step, ours is inside the waiting time and not added on top |
+| **Why waiting is slow** | slime sends all requests from one process and its CPU can't keep up: client-side p50 1.005 s vs. 0.036 s at the retriever (ASearcher, not reviewed). Retrieved text is ~52% (Search-R1) to 70–83% (ASearcher) of all tokens | verl's generation varies widely: 0–13 s on short steps, 194–236 s on long ones; sync and training run serially (not reviewed) |
+| **What helped (reviewed)** | Waiting: DEFER ×1.333 (ASearcher), engine hooks ×1.12–1.15 (ASearcher, Libra), prefetch ×1.033 (Search-R1). Training: response logits ×1.09–1.12 (Search-R1, ASearcher). Weight-sync changes: no effect | prefetch +13.51% (without it, ~30 s/step more waiting); expert placement +2.70% (~4 s/step less training) |
+| **Can the baseline get it by config?** | Partly: slime's own `--use-distributed-post` roughly halves waiting (not reviewed); with it on in both arms, our `rshard` adds only ×1.051 (not significant) | No: verl's Megatron path has no expert load balancing |
+| **Not measured** | Prefill vs. decode split; multi-node scale | Prefill vs. decode split; where prefetch's ~30 s comes from; sparse-attention (DSA) models; real retrieval |
+
+### 4.4 Two more observations
+
+Valid only for these workloads:
+- **Staleness admission helps only where a plain concurrency cap breaks the bound**: needed on Libra and ASearcher; no effect on Search-R1 (×0.996); 2.32% slower on Qwen3-Next.
+- **Faster sync doesn't always matter**: on Qwen3-Next, disabling engine hooks doubled sync time but step time did not change, because sync overlaps with waiting (not reviewed).
+
+---
 
 ## Install
 
