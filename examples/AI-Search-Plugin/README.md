@@ -52,17 +52,18 @@ Only model-written tokens are in the loss, but every token still goes through ev
 
 ## 2. How it differs from coding-agent RL
 
-AI search and coding agents (SWE-style tasks) are both multi-turn, tool-using RL and face essentially the same problems; none is unique to AI search. The difference is degree: AI search is an extreme case.
+AI search and coding agents (SWE-style tasks) are both multi-turn, tool-using RL and are the closest pair. Below is where AI search is more extreme. A qualitative comparison; the coding-agent column is not measured.
 
-| | Coding-agent RL | AI-search RL | Impact | Components |
+| Difference | AI search | Coding agents | Impact | Components |
 |---|---|---|---|---|
-| **What a sample contains** | Model-written code and commands, plus files and logs returned by tools | Mostly retrieved documents; the model writes little | Inference is mostly prefill; most training tokens are outside the loss but still computed | `response_logits` |
-| **Shared prompt** | Task and repository context, also sizable | Long system prompt + question, identical across a group's n answers | Computing the prefix once pays off | `prefix_tree` (stub) |
-| **Tool calls** | Few and slow (tests, builds: seconds to minutes) | Many and fast (tens of ms to seconds) | A few questions are held up by tools, so training must be async with a staleness bound | `ticket_admission`, `pool_fill`, `prefetch` |
-| **Bottleneck** | Sandbox and environment resources | Often the CPU and scheduling of the request sender (measured on ASearcher, see section 3) | Shard the rollout client; merge duplicate searches | `rshard`, `toolcache` |
-| **Weight updates** | A trajectory spans several updates | Same, with more turns | Stale caches must be invalidated; MoE routing and sparse attention must match between inference and training | `kvepoch` / `kvfresh`, `r3_transfer` |
+| **Read-heavy** | Each turn retrieves thousands of tokens of documents; the model writes a few hundred. Retrieved text is interleaved with the answer and keeps piling up | Also read files and logs, but model-written code and commands are a larger share | Inference is mostly prefill; the context keeps growing; most training tokens are outside the loss but still computed | `response_logits`, `kvepoch` / `kvfresh` |
+| **Long, identical prompt** | Long system prompt + question, identical across a group's n answers | Task and repository context, also shared within a group | Computing the prefix once pays off | `prefix_tree` (stub) |
+| **Many fast tool calls, unpredictable duration** | A few to 100+ searches per question, tens of ms to seconds each | Few calls, each slow (tests, builds) | GPUs wait on tools; a few questions hold up the batch, so training must be async with a staleness bound | `ticket_admission`, `prefetch` |
+| **Load drifts during training** | The model learns to search more; trajectories get longer | Also drifts, but tool time depends mostly on the task | In-flight amounts and GPU splits set at the start soon stop fitting | `ticket_admission`, `pool_fill` |
+| **Bottleneck often CPU and scheduling** | Many small requests; one process cannot send them fast enough (measured on ASearcher, see section 3) | Mostly sandbox and environment resources | Shard the rollout client over processes | `rshard` |
+| **Unreliable tool service, but reusable results** | Search services rate-limit, time out and fail; real search APIs cost money. Identical queries can be cached and merged | Code runs are per trajectory and not reusable | The tool tail becomes the trajectory tail; caching and backup requests save time directly | `toolcache`, `tool_hedge` |
 
-Two easy mistakes in any multi-turn RL: pass **token IDs** between turns (re-tokenizing breaks training), and mask retrieved tokens out of the loss.
+Common to both: a trajectory spans several weight updates, so stale caches must be invalidated and MoE routing / sparse attention must match between inference and training (`kvepoch` / `kvfresh`, `r3_transfer`). Also, pass **token IDs** between turns (re-tokenizing breaks training) and mask retrieved tokens out of the loss.
 
 ---
 
