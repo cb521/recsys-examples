@@ -48,10 +48,10 @@ Source: [Mega-Flink](https://github.com/cb521/Mega-Flink), docs and code.
 
 | | |
 |---|---|
-| When something is unsupported | No fallback: an unsupported function raises an exception during planning and the job fails |
-| Data conversion | None between native operators. Next to a Java operator, each record becomes its own single-row Arrow batch (batch size 1) |
-| State | On the native side. Open issues include a memory-pool leak with RocksDB (#11791); a key-hash collision that silently merged keys (#12805) is fixed; group aggregate is only just being added |
-| Open source / version | Apache-2.0; experimental; Flink 1.19.3 only; loaded by putting its jars first on the classpath (the user edits `config.sh`) |
+| When something is unsupported | Calc, aggregate, rank and similar nodes: an unsupported function or shape raises an exception during planning and the job fails. Source/Sink nodes with no matching factory fall back to Flink's original transformation; SEMI/ANTI joins and mini-batch cases keep Flink's operators |
+| Data conversion | None between adjacent native operators. On the Java input path each record is converted on arrival, one vector per row, with no batching (checked in code) |
+| State | On the native side. Only the two window-aggregate nodes pass RocksDB handles to native code; for other operators native state initialisation and restore under RocksDB was not found. The native snapshot returned at checkpoint is discarded. Tests only check that a job runs, not results, and there is no checkpoint-restore test. Open issues include a memory-pool leak with RocksDB (#11791) |
+| Open source / version | Apache-2.0; experimental; Flink 1.19.3 only; its own `PlannerModule` puts the planner jar first; three classes at client/TaskManager level (`StreamGraphTranslator`, `TaskManagerRunner`, `AbstractStreamTaskNetworkInput`) are overridden by the user editing `config.sh` |
 
 Source: [apache/gluten, `gluten-flink`](https://github.com/apache/gluten/tree/main/gluten-flink) code, README and issues.
 The README reports Nexmark q0 at 161 s versus 462 s for Flink; a community comment reports the opposite direction for
@@ -63,8 +63,8 @@ q0 (8 min versus 4 min). Neither states full test conditions.
 
 | | |
 |---|---|
-| When something is unsupported | Decided per operator chain (`JobVertex`). Mixing native and Flink tasks needs all edges to be forward edges; otherwise the whole job falls back. **This is our reading of the code, not stated in the docs** |
-| Data conversion | In C++: `rowdata_marshaller` turns `BinaryRowData` into a `VectorBatch`, and `extractRowData` turns it back |
+| When something is unsupported | Decided per operator chain (`JobVertex`), statically when the job graph is generated. For SQL jobs, if any edge is not a forward edge the whole job falls back; DataStream jobs are not subject to this. The flag is a static in the JobManager that is only ever set to false, so in a session cluster it can affect later jobs |
+| Data conversion | Native tasks pass `VectorBatch` pointers; no serialization on the same TaskManager, a custom columnar format across TaskManagers. Java to native: each row is copied and batches form at 1000 rows or 1 s. Native to Java: a heap-allocated row per record, the most expensive point |
 | State | Two paths: its own C++ backends, or OmniStateStore, a separate state backend that replaces Flink's. No batched state access API was found |
 | Open source / version | MulanPSL-2.0 (Java adapter: Apache-2.0); Flink 1.16.3; aarch64 Kunpeng with openEuler only; Join supports Inner only, and by default only Calc and a few others are enabled |
 

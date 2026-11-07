@@ -41,10 +41,10 @@ SPDX-License-Identifier: Apache-2.0
 
 | | |
 |---|---|
-| 不支持时 | 不退回：遇到不支持的函数，规划阶段直接抛异常，作业失败 |
-| 数据转换 | 原生算子之间没有转换。和 Java 算子相邻时，每条记录单独转成一个单行 Arrow 批（批大小 1） |
-| 状态 | 在原生侧。未解决的问题包括用 RocksDB 时内存池泄漏（#11791）；key 哈希碰撞会静默合并 key（#12805）已修；分组聚合刚开始做 |
-| 开源与版本 | Apache-2.0；实验性；只支持 Flink 1.19.3；靠把它的 jar 排在类路径最前面来加载（用户要改 `config.sh`） |
+| 不支持时 | Calc、聚合、排名等节点：遇到不支持的函数或形态，规划阶段直接抛异常，作业失败。数据源和输出节点找不到对应实现时，退回 Flink 原来的做法；半连接、反连接和开了 mini-batch 的情况仍用 Flink 原算子 |
+| 数据转换 | 相邻原生算子之间没有转换。Java 输入这条路径上，每条记录到达就转换，一行一个向量，不攒批（已在代码里核实） |
+| 状态 | 在原生侧。只有两个窗口聚合节点把 RocksDB 句柄传给原生；其他算子在 RocksDB 下怎么初始化、恢复原生状态，没找到。checkpoint 时原生返回的快照被丢弃。测试只检查作业能跑完，不比对结果，也没有 checkpoint 恢复的测试。未解决的问题包括用 RocksDB 时内存池泄漏（#11791） |
+| 开源与版本 | Apache-2.0；实验性；只支持 Flink 1.19.3；规划器那层由它自己的 `PlannerModule` 把 planner jar 排在最前；客户端和 TaskManager 那层的三个类（`StreamGraphTranslator`、`TaskManagerRunner`、`AbstractStreamTaskNetworkInput`）要用户改 `config.sh` 来覆盖 |
 
 来源：[apache/gluten 的 `gluten-flink`](https://github.com/apache/gluten/tree/main/gluten-flink) 代码、README 和 issue。
 README 报告 Nexmark q0 为 161 秒对 Flink 的 462 秒；社区有一条评论说 q0 的结果相反（8 分钟对 4 分钟）。两边都没给全测试条件。
@@ -55,8 +55,8 @@ README 报告 Nexmark q0 为 161 秒对 Flink 的 462 秒；社区有一条评�
 
 | | |
 |---|---|
-| 不支持时 | 按一条算子链（`JobVertex`）判定。要和 Flink 任务混跑，所有连接都得是 forward；否则整个作业回退。**这是我们读代码的推断，文档里没这么写** |
-| 数据转换 | 在 C++ 里做：`rowdata_marshaller` 把 `BinaryRowData` 转成 `VectorBatch`，`extractRowData` 再转回来 |
+| 不支持时 | 按一条算子链（`JobVertex`）判定，在生成作业图时静态决定。对 SQL 作业，只要有一条边不是 forward，整个作业回退；DataStream 作业不受这条限制。这个开关是 JobManager 里的静态变量，只会被置为 false、不会重置，在 session 集群里会影响后面的作业 |
+| 数据转换 | 原生任务之间传 `VectorBatch` 指针：同一个 TaskManager 内不序列化，跨 TaskManager 用自定义列式格式。Java 到原生：每行拷贝一次，攒满 1000 行或 1 秒成一批。原生到 Java：每条记录堆上分配一行，是最贵的转换点 |
 | 状态 | 两条路：自带的 C++ 后端；或 OmniStateStore，一个独立的状态后端，替换 Flink 的。没找到批量访问状态的接口 |
 | 开源与版本 | 木兰 PSL-2.0（Java 适配层是 Apache-2.0）；Flink 1.16.3；只能跑在鲲鹏 aarch64 + openEuler；Join 只支持 Inner，默认只开 Calc 等少数算子 |
 
