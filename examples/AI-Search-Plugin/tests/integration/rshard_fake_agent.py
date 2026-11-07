@@ -4,10 +4,8 @@ Engine outputs are a pure function of the request (input ids, max_new_tokens), s
 produce bit-identical samples."""
 import asyncio
 import hashlib
-import json
 import random
 import sys
-import time
 
 TURNS = 3
 

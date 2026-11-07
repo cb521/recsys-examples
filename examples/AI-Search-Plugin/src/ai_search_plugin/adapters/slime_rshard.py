@@ -233,44 +233,6 @@ class RShard:
 
         hu.init_http_client(a, concurrency=self.cap + 64)
         self.probe.install(hu)
-        # shards of a LENT engine (only used by the elastic GPU-lending component, which is NOT shipped in this
-        # package - dormant code): when the engine is taken back, the shard's
-        # remaining /generate calls go to a resident engine (`redirect`), and a call that came back aborted by that
-        # reclaim is re-sent there (same payload, same policy version) instead of failing the trajectory.
-        self.redirect, self.redir_epoch, self.resent = None, 0, 0
-        self._install_redirect(hu)
-
-    def _install_redirect(self, hu):
-        orig = hu._post
-        me = self
-
-        def _abort(out):
-            try:
-                return out["meta_info"]["finish_reason"]["type"] == "abort"
-            except Exception:
-                return False
-
-        async def _post(client, url, payload, *a, **kw):
-            if not str(url).endswith("/generate"):
-                return await orig(client, url, payload, *a, **kw)
-            for k in range(4):
-                ep, red = me.redir_epoch, me.redirect
-                u = str(url)
-                if red and u.startswith(me.url):
-                    u = red + u[len(me.url):]
-                out = await orig(client, u, payload, *a, **kw)
-                if k < 3 and me.redir_epoch != ep and me.redirect and _abort(out):
-                    me.resent += 1
-                    continue
-                return out
-            return out
-
-        hu._post = _post
-
-    async def set_redirect(self, url):
-        self.redirect = url or None
-        self.redir_epoch += 1
-        return {"shard": self.idx, "resent": self.resent}
 
     async def ready(self):
         import socket
@@ -374,12 +336,10 @@ class ShardPool:
                 opt["scheduling_strategy"] = NodeAffinitySchedulingStrategy(nodes[host], soft=True)
             return Actor.options(**opt).remote(args, k, url, cap_s, conc_s, env)
 
-        self._make, self.per = make, per
         for k in range(K):
             e = k % E
             self.shards.append(make(k, urls[e]))
             self.engine_of.append(e)
-        self.lent_idx, self.lent_urls, self.lent_on = [], [], False  # shards of lent engines
         t = float(os.environ.get("ASRT_RS_READY_S", "300"))
         info = ray.get([s.ready.remote() for s in self.shards], timeout=t)
         self.load = [0] * K
@@ -406,54 +366,10 @@ class ShardPool:
             except Exception:
                 pass
 
-    # ---- lent engines (dormant: elastic lending is not shipped) -------------------------------------------------
-    def prepare_lent(self, urls):
-        """Create the lent engines' shards ahead of the first lend (closed: pick() skips them until lend())."""
-        import ray
-
-        t0 = time.time()
-        if list(urls) != self.lent_urls:
-            if self.lent_urls:
-                raise RuntimeError("lent engine set changed")
-            new = []
-            for url in urls:
-                for _ in range(self.per):
-                    k = len(self.shards)
-                    self.shards.append(self._make(k, url))
-                    self.engine_of.append(-1)
-                    self.load.append(0)
-                    new.append(k)
-            ray.get([self.shards[k].ready.remote() for k in new], timeout=float(os.environ.get("ASRT_RS_READY_S", "300")))
-            self.lent_idx, self.lent_urls = new, list(urls)
-        return round(time.time() - t0, 2)
-
-    def lend(self, urls):
-        """Engines lent from the trainer GPUs join the pool: `per` shards each (created the first time, reused
-        after).  Only groups admitted from now on can be placed there (a group never moves: prefix affinity)."""
-        import ray
-
-        t0 = time.time()
-        self.prepare_lent(urls)
-        ray.get([self.shards[k].set_redirect.remote(None) for k in self.lent_idx])
-        self.lent_on = True
-        return round(time.time() - t0, 2)
-
-    def reclaim(self, resident_urls=None):
-        """Lent engines are being taken back: no new groups there; their shards send the rest of their in-flight
-        groups (and the turns the reclaim aborts) to resident engines, round-robin."""
-        import ray
-
-        self.lent_on = False
-        res = list(resident_urls or self.urls)
-        out = ray.get([self.shards[k].set_redirect.remote(res[i % len(res)]) for i, k in enumerate(self.lent_idx)])
-        return {"lent_shard_load": sum(self.load[k] for k in self.lent_idx),
-                "resent": sum(o.get("resent", 0) for o in out)}
-
     def pick(self):
         best, bl = None, None
-        lent = set(self.lent_idx) if not self.lent_on else ()
         for k, l in enumerate(self.load):
-            if k in self.dead or k in lent:
+            if k in self.dead:
                 continue
             if bl is None or l < bl:
                 best, bl = k, l

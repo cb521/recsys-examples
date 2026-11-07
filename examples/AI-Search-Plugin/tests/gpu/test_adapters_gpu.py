@@ -9,7 +9,6 @@ log-probs / entropy, the output-layer weight grad and the grad of the decoder ou
 """
 import argparse
 import os
-import sys
 from functools import partial
 from types import SimpleNamespace
 

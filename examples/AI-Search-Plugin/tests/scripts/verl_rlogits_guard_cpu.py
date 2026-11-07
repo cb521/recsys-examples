@@ -1,8 +1,6 @@
 """CPU test of ai_search_plugin.adapters.verl response_logits guard (_guard_response_logits / _rlogits_kept_rows) and
 the engine hook of the `response_logits` feature. Fake response_logits package; no GPU, no verl needed.
 Run: python3 tests/scripts/verl_rlogits_guard_cpu.py"""
-import importlib
-import inspect
 import os
 import sys
 import types
@@ -86,7 +84,7 @@ assert run(long_ans) == "stock"
 # padded loss_mask (the production verl v1 path): unchanged, always compact, also when > 50% of rows carry loss
 lm_q = torch.ones(2, R, dtype=torch.bool); ram_q = torch.zeros(2, R, dtype=torch.long); ram_q[0, :800] = 1; ram_q[1, :900] = 1
 assert old_guard(lm_q, ids) == "compact" and run(lm_q, ram_q) == "compact" and run(lm_p, ram) == "compact"
-assert V._rlogits_kept_rows(lm_p, ram) is None
+assert V._rlogits_kept_rows(lm_p) is None
 assert run(None) == "compact"
 # threshold env is read when the guard is installed: 0.9 keeps the long single-turn batch compact
 V._RL.update(compact=0, stock=0)

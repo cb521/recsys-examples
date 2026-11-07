@@ -171,8 +171,6 @@ def install_manager_health_guard() -> bool:
     global _hm_installed
     if _hm_installed:
         return True
-    import gc
-
     # The manager's class is shipped to its Ray worker by value (the module attribute is the
     # ActorClass wrapper), so find the live class object; guard every probe because some
     # lazy objects (absl flags) raise on attribute access.
@@ -594,8 +592,6 @@ def install_actor() -> bool:
     overlap = "overlap" in o
 
     def _timed_get(self, ref):
-        import torch.distributed as dist
-
         t0 = time.perf_counter()
         out = orig_get(self, ref)
         torch.cuda.current_stream().synchronize()

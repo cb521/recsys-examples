@@ -31,9 +31,8 @@ def max_staleness() -> int | None:
 
 
 def stale_mode() -> str:
-    """ASRT_STALE_MODE: 'ticket' (default) or 'count' (old group-count cap).  'ooo' (out-of-order batch assembly,
-    slime_admit.OooTickets) is DEPRECATED (no measured gain) and refused by ai_search_plugin.install().  Only slime_admit / slime_pool read it; the verl
-    ceiling has its own ticket reader and ignores it."""
+    """ASRT_STALE_MODE: 'ticket' (default) or 'count' (old group-count cap).  Only slime_admit / slime_pool read it;
+    the verl ceiling has its own ticket reader and ignores it."""
     return os.environ.get("ASRT_STALE_MODE", "ticket").strip().lower()
 
 
@@ -109,15 +108,6 @@ def staleness_line(rollout, mean, mx, S, frac_over, tail: str = "") -> str:
 # and only a group that has itself reached T may be cut (a group cut earlier would not count as slow).
 def slow_s() -> float:
     return float(os.environ.get("ASRT_TICKET_SLOW_S", "300"))
-
-
-def ooo_p() -> float:
-    """Share p for the ratio cut budget: ASRT_TICKET_DROP=ratio:<p>; ASRT_TICKET_DROP=0/off/none -> 0 (never
-    cut, every straggler is waited for); anything else -> 1.0 (every verl baseline measured so far: p = 1)."""
-    p = ratio_p()
-    if p is not None:
-        return p
-    return 0.0 if os.environ.get("ASRT_TICKET_DROP", "").strip().lower() in ("0", "off", "none", "no") else 1.0
 
 
 def ratio_p():

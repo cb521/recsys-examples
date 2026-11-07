@@ -30,13 +30,14 @@ What changed in the port (behaviour of the shipped components is otherwise uncha
    (`verl.pick_server`) were dropped with it (expert placement now uses the pure-Python `placement_py`; the verl `route` feature uses its own
    pure-Python picker).
 3. **Deprecated components removed** (tried, no measured gain): out-of-order batch assembly (`ASRT_STALE_MODE=ooo`,
-   `OooTickets` class), straggler slip (`ASRT_TICKET_SLIP`, now a no-op), slow-tool cut (`ASRT_TICKET_SLOWTOOL_S`,
-   module `slowtool` not shipped), closed-loop extra fill (`ASRT_STALE_FILL`, forced off), verl-window cut
-   (`ASRT_TICKET_DROP=verl4`, forced off - its branch in `Tickets._drop_overdue` is dead code left for a later cleanup),
-   elastic GPU lending (`slime_elastic`, `verl_elastic`; the dormant "lent engine" code paths in `slime_rshard` and the
-   `lender` hooks in `slime_train` remain but are never activated), cross-engine rebalancing (`slime_rbal`), expert
-   replication.  `ai_search_plugin.install()`, the slime init hook and the verl plugin refuse these switches
-   (`registry.DEPRECATED_ENV`).  Their tests were not ported.
+   `OooTickets` class), straggler slip (`ASRT_TICKET_SLIP`), slow-tool cut (`ASRT_TICKET_SLOWTOOL_S`, module
+   `slowtool`), closed-loop extra fill (`ASRT_STALE_FILL`), verl-window cut (`ASRT_TICKET_DROP=verl4`), elastic GPU
+   lending (`slime_elastic`, `verl_elastic`, with the "lent engine" paths in `slime_rshard` and the `lender` hooks in
+   `slime_train`), cross-engine rebalancing (`slime_rbal`), expert replication.  Their code, switches and tests are
+   not in the plugin; the switches are not read (`ASRT_STALE_MODE` accepts `ticket` (default) / `count`).
+   Resuming from a checkpoint written by an older internal `slime_admit` with lost prompts regenerated from its
+   `admit.jsonl` (`ASRT_RESUME_HANDOUT_LOG`) was also removed; a checkpoint without the ticket book (slime's own
+   fully-async state, or count mode) is still resumed by adopting its completed groups as the next tickets.
 4. **The train-perf bundle (`asrt.adapters.trainperf`) is not shipped** (its model-specific kernel selection belongs
    to one proprietary model).  In `adapters/verl.py` the `trainperf` feature was replaced by a `response_logits`
    feature that installs only the ported response_logits verl adapter + its guard; the opt-in FSDP response_logits hook
@@ -59,8 +60,8 @@ What changed in the port (behaviour of the shipped components is otherwise uncha
    - `slime_admit_cpu.py::test_flush1_cut_requeue_e2e`: whether the cut+requeue path is hit is timing dependent (the
      source test also missed it in about 1 of 4 isolated runs).  It now retries up to 4 times for path coverage; every
      attempt still checks all correctness assertions.
-   - tests of removed features were dropped (ooo / slip / slow-tool / verl4 / placement / the internal kvprobe
-     converter); `verl_rlogits_guard_cpu.py` and `verl_adapter_cpu.py` fake `ai_search_plugin.response_logits`
+   - tests of removed features were dropped (ooo / slip / slow-tool / verl4 / closed-loop fill / placement / the
+     internal kvprobe converter / resume from an old internal checkpoint with `admit.jsonl` regeneration); `verl_rlogits_guard_cpu.py` and `verl_adapter_cpu.py` fake `ai_search_plugin.response_logits`
      instead of a top-level `response_logits` package; tool-hedge tests use explicit targets.
    - **not run here**: `tests/gpu/*` (needs CUDA + Megatron, `torchrun`) and `tests/integration/slime_rshard_ray.py`
      (needs slime + Ray + a tokenizer).

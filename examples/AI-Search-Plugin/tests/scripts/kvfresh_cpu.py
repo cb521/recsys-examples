@@ -5,7 +5,7 @@ The fake scheduler follows the slime-cu130 SGLang code (scheduler.py is_fully_id
 pause_generation 5611-5680; http_server.py /flush_cache 1006-1021: 200 if success else 400; tokenizer generate waits for
 un-pause before tokenizing, tokenizer_manager.py 911-919).  Radix keys are (extra_key, tokens) as in radix_cache.py.
 Run: python3 tests/scripts/kvfresh_cpu.py"""
-import os, sys, tempfile, types, json, glob
+import os, tempfile, types, json, glob
 
 os.environ["ASRT_SGL_HOOKS"] = "kvfresh"
 LOG = tempfile.mkdtemp(prefix="kvfresh-test-")

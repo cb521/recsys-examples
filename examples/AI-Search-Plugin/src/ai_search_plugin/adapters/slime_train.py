@@ -56,8 +56,6 @@ def make_train(orig_train, T):
             ray.get(rollout_manager.check_weights.remote(action="compare"))
         if args.num_rollout == 0 and args.eval_interval is not None:
             ray.get(rollout_manager.eval.remote(rollout_id=0))
-        # (the elastic GPU-lending component of the original code base was dropped: no measured gain)
-        lender = None
 
         pending = None  # (rollout_id, ObjectRef of generate)
         for rollout_id in range(args.start_rollout_id, args.num_rollout):
@@ -66,19 +64,9 @@ def make_train(orig_train, T):
             t0 = time.time()
             if pending is None or pending[0] != rollout_id:
                 pending = (rollout_id, rollout_manager.generate.remote(rollout_id))
-            if lender is not None and not lender.lent:
-                lender.maybe_lend(lambda: bool(ray.wait([pending[1]], timeout=0.0)[0]), rollout_id)
-            was_lent = lender is not None and lender.lent
             rollout_data_ref = ray.get(pending[1])
             pending = None
             t_gen = time.time() - t0
-            if lender is not None:
-                t_rc = lender.reclaim(rollout_id)  # lent engines asleep before train() touches the memory
-                t_gen += lender.pre_wait  # part of the wait was spent before posting the batch (end of last step)
-                lender.pre_wait = 0.0
-                lender.observe_wait(t_gen, was_lent)
-                print(f"[asrt] elastic step {rollout_id}: wait {t_gen:.1f}s lent={was_lent} reclaim {t_rc:.2f}s",
-                      flush=True)
             ray.get(actor_model.async_train(rollout_id, rollout_data_ref))
             ray.get(rollout_manager.training_completed.remote(rollout_id))
             if should(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout):
@@ -103,8 +91,6 @@ def make_train(orig_train, T):
                             board.post.remote(nxt, ray.get(gen))
                             posted_at = time.time() - t1
                     _, left = ray.wait(left, num_returns=len(left), timeout=0.05)
-                if posted_at is None:  # batch not ready during the update: post as soon as it is
-                    pass
             ray.get(upd)
             t_upd = time.time() - t1
             if nxt < args.num_rollout:
@@ -112,20 +98,13 @@ def make_train(orig_train, T):
             if overlap and posted_at is None:
                 # still post early: the trainers' threads start pulling as soon as it is ready,
                 # train(nxt) joins that pull instead of starting its own
-                if lender is not None:  # the trainer is about to wait for batch nxt: lend its GPUs
-                    lender.maybe_lend(lambda: bool(ray.wait([gen], timeout=0.0)[0]), nxt)
-                t_w = time.time()
                 refs = ray.get(gen)
-                if lender is not None:
-                    lender.pre_wait += time.time() - t_w
                 board.post.remote(nxt, refs)
             print(f"[asrt] step {rollout_id}: wait_generate {t_gen:.1f}s update_weights {t_upd:.1f}s "
                   f"next_batch_posted_during_update={posted_at is not None}"
                   + (f" at +{posted_at:.1f}s" if posted_at is not None else ""), flush=True)
             if eval_now:
                 ray.get(rollout_manager.eval.remote(rollout_id))
-        if lender is not None:
-            lender.shutdown()
 
     return train
 

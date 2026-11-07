@@ -22,7 +22,7 @@ component by name except the registry, the framework entry points (which read th
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
 MODEL_AGNOSTIC = "model-agnostic"
@@ -204,38 +204,6 @@ COMPONENTS: List[Component] = [
        "GDN conv fusion + four EP communication items from the training-speed line.",
        ("slime",), False, "(not ported)", STUB, ("stubs.gdn_convfuse_ep",), family="GDN / MoE"),
 ]
-
-# Environment switches of components that were tried and deprecated (no measured gain).  The ported code still reads
-# some of them in dead branches; install() refuses them so a stale job script cannot silently turn them back on.
-DEPRECATED_ENV: Dict[str, str] = {
-    "ASRT_STALE_MODE": "ooo (out-of-order batch assembly) is deprecated; only 'ticket' (default) / 'count' are kept",
-    "ASRT_TICKET_SLIP": "straggler slip is deprecated",
-    "ASRT_STALE_FILL": "closed-loop extra fill is deprecated",
-    "ASRT_TICKET_SLOWTOOL_S": "slow-tool cut is deprecated",
-    "ASRT_RBAL": "cross-engine rebalancing is deprecated (not shipped)",
-    "ASRT_ELASTIC": "elastic GPU lending is deprecated (not shipped)",
-    "ASRT_VERL_ELASTIC": "elastic GPU lending is deprecated (not shipped)",
-    "ASRT_REPLICA": "expert replication is deprecated (not shipped)",
-}
-_DEPRECATED_OK = {"ASRT_STALE_MODE": ("ticket", "count", "")}
-
-
-def deprecated_env_in(env) -> List[str]:
-    """Names of deprecated switches that are set (to a non-default value) in the mapping ``env``."""
-    bad = []
-    for k in DEPRECATED_ENV:
-        v = (env.get(k) or "").strip().lower()
-        if not v or v in ("0", "off", "false", "no") or v in _DEPRECATED_OK.get(k, ()):
-            continue
-        if k == "ASRT_TICKET_SLOWTOOL_S":
-            try:
-                if float(v) <= 0:
-                    continue
-            except ValueError:
-                pass
-        bad.append(k)
-    return bad
-
 
 _BY_NAME: Dict[str, Component] = {c.name: c for c in COMPONENTS}
 assert len(_BY_NAME) == len(COMPONENTS), "duplicate component name"

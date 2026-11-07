@@ -186,11 +186,8 @@ def install(components="default", options: Optional[dict] = None, environ=None) 
 def megatron_init(args=None, *rest, **kwargs):
     """``--custom-megatron-init-path`` target (runs in every slime training actor).
 
-    Refuses deprecated switches, then runs the weight-sync / resume / jitfix / prefetch / R3-check installers and the
+    Runs the weight-sync / resume / jitfix / prefetch / R3-check installers and the
     chained hooks (ASRT_CHAIN_MEGATRON_INIT: response_logits, jitcache, the user's own init)."""
-    bad = registry.deprecated_env_in(os.environ)
-    if bad:
-        raise RuntimeError(f"ai_search_plugin: deprecated switches set: {bad} ({[registry.DEPRECATED_ENV[b] for b in bad]})")
     from ..adapters import slime_weightsync
 
     return slime_weightsync.megatron_init(args)

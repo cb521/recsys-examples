@@ -139,13 +139,8 @@ class GatedBuffer:
 
 # ----------------------------------------------------------------------------------------------- ticket mode
 def _ticket_mode() -> bool:
-    # ticket: default (ceiling held in every tested workload, faster than count); count = old cap;
-    # ooo (deprecated, not shipped) is refused when the worker starts
-    return max_staleness() is not None and SC.stale_mode() in ("ticket", "ooo")
-
-
-def _ooo_mode() -> bool:
-    return max_staleness() is not None and SC.stale_mode() == "ooo"
+    # ticket: default (ceiling held in every tested workload, faster than count); count = old cap
+    return max_staleness() is not None and SC.stale_mode() == "ticket"
 
 
 def _gkey(group):
@@ -193,7 +188,6 @@ class Tickets:
         self.ticket_of = {}    # group key -> ticket
         self.start_rel = {}    # group key -> weight updates since batch 0 when it was admitted (lower bound)
         self.pend_keys = {}    # ticket -> keys admitted, not yet finished
-        self.slipped = 0
         self.deferred = 0
         self.n_rollout = None  # set by the installer: run length (rollouts), for the whole-run cut budget
         self.gidx = {}         # group key -> slime group_index (slow-tool lookup)
@@ -228,12 +222,11 @@ class Tickets:
         # so labels may only ever LOWER this bound, never raise it.
         self.sr_first = {}     # group key -> start_rel at first admission
         self.sr_by_gi = {}     # group_index -> same (staleness log: train version - this = token-level upper bound)
-        # checkpoint resume (see snapshot / restore / adopt_legacy and the worker state_dict patch)
-        self.replay = []       # groups to admit before slime's source (legacy resume: prompts lost by an old checkpoint)
+        # checkpoint resume (see snapshot / restore / adopt_without_book and the worker state_dict patch)
         self.resume_floor = None       # engine version at the save: every group finishing after the resume is newer
         self.resume_version_bad = 0    # groups finishing after a resume with all versions below that (version reset)
         self.resume_m_bad = 0          # restored batch counter != the rollout slime asks for after the resume
-        self.v0_off = None             # legacy resume: v0 = min(newest version of a finished group) - v0_off
+        self.v0_off = None             # resume without a book: v0 = min(newest version of a finished group) - v0_off
         self.resumed = None            # {"mode": ..., ...} what the last resume restored (logged)
 
     def vstart_rel(self, k, vs):
@@ -472,12 +465,10 @@ class Tickets:
                 self.pending[t] = self.pending.get(t, 0) - 1
                 self.pend_keys.get(t, set()).discard(k)
                 self.buf.setdefault(t, []).append((gid, g))
-            if _defer_on():  # cut first: an overdue straggler at the ceiling must get a replacement before
-                self._drop_overdue()  # _defer hands the finished later groups to deferrable stragglers
+            # cut first: an overdue straggler at the ceiling must get a replacement before
+            self._drop_overdue()  # _defer hands the finished later groups to deferrable stragglers
+            if _defer_on():
                 self._defer()
-            else:
-                self._slip()
-                self._drop_overdue()
             out = []
             want = limit if limit is not None else 1 << 30
             for t in sorted(self.buf):
@@ -539,9 +530,8 @@ class Tickets:
         (e.g. question-bound slow tools: 9-11 calls x 40-100 s per trajectory vs ~30 s steps; hedging re-sends to the
         same slow tool).  The prompt is skipped, not regenerated (it would
         be just as slow); counted in stats['dropped'] (lock held)."""
-        verl4 = _verl4_on()
-        dl = self.drop_deadline() if not verl4 else 0.0
-        if SC.ratio_p() is not None and not verl4:
+        dl = self.drop_deadline()
+        if SC.ratio_p() is not None:
             dl = SC.slow_s()  # ratio mode: a group may be cut once it is slow (>= T), warm-up included
         m = self.m
         nxt = self.buf.get(m + 1) or []
@@ -549,25 +539,9 @@ class Tickets:
         # (it waits for this hand-out) - then free the slot instead, a fresh group is admitted into batch m
         refill = _defer_on() and not nxt
         now = time.time()
-        # (the slow-tool cut ASRT_TICKET_SLOWTOOL_S of the original code base is deprecated and not shipped)
-        slowk = []
-        if (dl is None and not slowk) or self.pending.get(m, 0) <= 0 or (not nxt and not refill):
+        if dl is None or self.pending.get(m, 0) <= 0 or (not nxt and not refill):
             return
-        if verl4:
-            # ASRT_TICKET_DROP=verl4 (deprecated, dead branch): verl's own rule, in versions - a group is not trained
-            # once step - enqueue + 1 > ASRT_TICKET_VERL_WINDOW (4), age counted from its first version (start_rel).
-            # verl's clock advances every step; ours stops while batch m waits for the straggler, so the time waited
-            # since the last hand-out counts as versions at the median step time (no step measured yet -> the first
-            # hand-out interval is unknown, nothing is evicted).  No budget: scored only if cuts <= verl's count.
-            W = int(os.environ.get("ASRT_TICKET_VERL_WINDOW", "4"))
-            med = sorted(self.step_s)[len(self.step_s) // 2] if self.step_s else None
-            if med is None or self._t_last_batch is None:
-                return
-            v_now = self.rel() + (now - self._t_last_batch) / max(med, 1e-6)
-            late = [k for k in self.pend_keys.get(m, ()) if v_now - self.start_rel.get(k, v_now) + 1 > W]
-        else:
-            late = [k for k in self.pend_keys.get(m, ()) if dl is not None and self.own_age(k, now) > dl]
-            late += [k for k in slowk if k not in late]
+        late = [k for k in self.pend_keys.get(m, ()) if self.own_age(k, now) > dl]
         # guard: at most max(1, ASRT_TICKET_DROP_MAXFRAC (2%) x batch) groups cut per batch, so a bad deadline cannot
         # reshape the training distribution; beyond that the batch waits as usual (warned once per batch)
         cap = max(1, int(float(os.environ.get("ASRT_TICKET_DROP_MAXFRAC", "0.02")) * self.B))
@@ -589,8 +563,6 @@ class Tickets:
                         self.slow_keys.add(k)
                 late = [k for k in late if k in self.slow_keys]
                 room = int(p_ratio * len(self.slow_keys) + 1e-9) - self.n_dropped
-        if verl4:
-            room = len(late)
         if late and room <= 0:
             if self.drop_in_batch.get(("warned", m)) is None:
                 self.drop_in_batch[("warned", m)] = True
@@ -622,14 +594,9 @@ class Tickets:
                   f"{self.own_age(k, now):.0f} s at the ceiling; cut {self.n_dropped} so far "
                   f"(compare: verl slow-not-trained in the same window)", flush=True)
             _log({"event": "ticket_drop", "t": now, "batch": m, "age_s": round(self.own_age(k, now), 1),
-                  "deadline_s": round(dl, 1) if dl is not None else None, "slowtool": k in slowk, "sample_index": k[1] if k[0] == "i" else None})  # which question was cut
+                  "deadline_s": round(dl, 1) if dl is not None else None, "sample_index": k[1] if k[0] == "i" else None})  # which question was cut
         if not nxt and (m + 1) in self.buf:
             del self.buf[m + 1]
-
-    def _slip(self):
-        """The ASRT_TICKET_SLIP straggler swap of the original code base is deprecated (no measured gain) and not
-        shipped; kept as a no-op so the hand-out path is unchanged."""
-        return
 
     def _defer(self):
         """ ASRT_TICKET_DEFER=1: verl-style batching (v1 ReplayBuffer samples ANY finished groups; a slow
@@ -640,7 +607,7 @@ class Tickets:
         finished group moves into batch m.  Ticket sizes are unchanged, and a deferred group can be deferred again.
         A straggler no later ticket can take is at the ceiling: it is waited for (default), or cut by the
         overdue deadline with ASRT_TICKET_DROP_S=auto and counted as dropped - the ceiling S=2 is stricter than verl's 4-version
-        window, so that is where the two still differ.  Generalises the opt-in slip (m+1 only), lock held."""
+        window, so that is where the two still differ.  Lock held."""
         m = self.m
         if self.pending.get(m, 0) <= 0:
             return
@@ -708,7 +675,7 @@ class Tickets:
         with self.lock:
             return {"m": self.m, "rel_version": self.rel(), "v_eng": self.v_eng, "vmax": self.vmax, "v0": self.v0, "live": {t: c for t, c in self.count.items() if c},
                     "pending": {t: c for t, c in self.pending.items() if c}, "buffered": {t: len(v) for t, v in self.buf.items()},
-                    "admitted": self.admitted, "refused": self.refused, "stale_requeue": self.stale_requeue, "slipped": self.slipped, "deferred": self.deferred, "slow_groups": len(self.slow_keys), "dropped": self.n_dropped, "drop_guarded": self.drop_guarded,
+                    "admitted": self.admitted, "refused": self.refused, "stale_requeue": self.stale_requeue, "deferred": self.deferred, "slow_groups": len(self.slow_keys), "dropped": self.n_dropped, "drop_guarded": self.drop_guarded,
                     "filter_refunds": self.filter_refunds, "refreshed": self.refreshed, "peak_live": self.peak_live,
                     "cut_requeue_dropped": self.cut_requeue_dropped, "cut_readmit_ignored": self.cut_readmit_ignored,
                     "cut_running": len(self.dropped), "ledger_bad": self.ledger_bad}
@@ -752,7 +719,7 @@ class Tickets:
         go through take() again.  rid = the rollout slime asks for now (must equal the restored batch counter)."""
         with self.lock:
             n_rollout = self.n_rollout
-            keep = {k: getattr(self, k) for k in ("B", "S", "p") if hasattr(self, k)}   # this run's settings win
+            keep = {k: getattr(self, k) for k in ("B", "S") if hasattr(self, k)}   # this run's settings win
             for k, v in d.items():
                 if k == "__cls__" or k in self._VOLATILE or k in keep:
                     continue
@@ -770,40 +737,18 @@ class Tickets:
                 print(f"[asrt] ticket resume: restored batch counter m={self.m} but slime asks for rollout {rid}; "
                       f"ledger BAD", flush=True)
             self.resumed = {"mode": "book", "m": self.m, "rid": rid, "v0": self.v0, "vmax": self.vmax,
-                            "floor": self.resume_floor, "buffered_restored": sum(len(s) for s in self.pend_keys.values()),
-                            "replay": len(self.replay)}
+                            "floor": self.resume_floor, "buffered_restored": sum(len(s) for s in self.pend_keys.values())}
             return self.resumed
 
-    def adopt_legacy(self, rid, queued, ds, handout_logs=()):
-        """Resume from a checkpoint written without the book (an older version of this module): the groups that sat in buf are lost
-        from the checkpoint.  With the previous segments' admit.jsonl (ASRT_RESUME_HANDOUT_LOG) every prompt drawn
-        before the save that was neither handed out nor cut is generated again from the dataset in prompt order -
-        the restored completed groups too (their start versions are unknown, so they could break the ceiling) and
-        slime's requeued partial groups - so the batches continue with the same group indices as without the
-        restart.  Without the logs the restored groups are adopted as tickets m, m+1, ... (handed out a batch EARLIER
-        than planned: staleness only lower) and the lost prompts stay lost (counted, warned).
-        queued: [(gid, group)] restored into slime's output queue (removed from it by the caller when regenerated).
-        Returns (info, regenerated: bool)."""
+    def adopt_without_book(self, rid, queued):
+        """Resume from a checkpoint saved without the ticket book (slime's own fully-async state, or this module in
+        count mode): the restored completed groups are adopted as tickets m, m+1, ... (handed out a batch EARLIER
+        than planned: staleness only lower).  queued: [(gid, group)] restored into slime's output queue.
+        Returns info."""
         with self.lock:
             self.m = int(rid)
             self.v0_off = int(rid)      # first sync after the resume publishes v0 + rid (slime_resume)
-            info = {"mode": "legacy", "m": self.m, "restored_ready": len(queued)}
-            regen = _legacy_regen_set(rid, ds, handout_logs, info) if handout_logs else None
-            if regen is not None:
-                n = int(getattr(getattr(ds, "args", None), "n_samples_per_prompt", 1) or 1)
-                groups = _groups_from_dataset(ds, regen, n, info)
-                if groups is not None:
-                    gis = set(regen)
-                    buf = getattr(ds, "buffer", None)
-                    if isinstance(buf, list):   # slime's requeued partial groups: regenerated fresh instead
-                        keep = [g for g in buf if _group_index(g) not in gis]
-                        info["requeued_regenerated"] = len(buf) - len(keep)
-                        buf[:] = keep
-                    self.replay = groups
-                    info["regenerated"] = len(groups)
-                    info["first_regenerated_gi"] = regen[0] if regen else None
-                    self.resumed = info
-                    return info, True
+            info = {"mode": "no_book", "m": self.m, "restored_ready": len(queued)}
             # adopt: oldest first, B per ticket from m (no version budget: they were admitted for a ticket >= m)
             t = self.m
             for gid, g in queued:
@@ -818,7 +763,7 @@ class Tickets:
                 self.admitted += 1
             info["adopted"] = len(queued)
             self.resumed = info
-            return info, False
+            return info
 
 
 def _group_index(group):
@@ -830,108 +775,14 @@ def _group_index(group):
         return None
 
 
-def _legacy_regen_set(rid, ds, paths, info):
-    """Group indices drawn from the source before the save (< its group cursor) that were neither handed out in a
-    batch < rid nor cut, from the previous segments' admit.jsonl.  None if that cannot be decided."""
-    G = getattr(ds, "sample_group_index", None)
-    if G is None:
-        info["regen_refused"] = "source has no group cursor"
-        return None
-    handed, cut = set(), set()
-    n = int(getattr(getattr(ds, "args", None), "n_samples_per_prompt", 1) or 1)
-    for p in paths:
-        # admit.jsonl is appended to by every process that used this log dir: the old book counted batches from 0 per
-        # process, so each block of rows gets the offset of the 'ticket' event that closes it (take() logs the
-        # hand-out, then batch_done() logs 'ticket' with the slime rollout id).  Rows after the last 'ticket' event
-        # (batch being collected when the job stopped) keep the last offset.
-        blocks, cur, last_off = [], [], None
-        try:
-            with open(p) as f:
-                for line in f:
-                    try:
-                        r = json.loads(line)
-                    except ValueError:
-                        continue
-                    ev = r.get("event")
-                    if ev in ("ticket_handout", "ticket_drop", "cut_requeue_dropped"):
-                        cur.append(r)
-                    elif ev == "ticket" and r.get("rollout") is not None and r.get("m") is not None:
-                        last_off = int(r["rollout"]) - (int(r["m"]) - 1)
-                        blocks.append((last_off, cur))
-                        cur = []
-        except OSError as e:
-            info["regen_refused"] = f"cannot read {p}: {e!r}"
-            return None
-        blocks.append((last_off or 0, cur))
-        for off, rows in blocks:
-            off = off or 0
-            for r in rows:
-                b = r.get("batch", r.get("m"))
-                if b is None or int(b) + off >= int(rid):
-                    continue   # after the checkpoint (segment end overran it): not part of the restored run
-                if r["event"] == "ticket_handout":
-                    for row in r.get("groups") or []:
-                        if row and row[0] is not None:
-                            handed.add(int(row[0]))
-                elif r.get("sample_index") is not None:
-                    cut.add(int(r["sample_index"]) // n)
-    regen = sorted(set(range(int(G))) - handed - cut)
-    info.update(handed_logged=len(handed), cut_logged=len(cut), cursor=int(G), to_regenerate=len(regen))
-    B = int(getattr(getattr(ds, "args", None), "rollout_batch_size", 0) or 0)
-    S = max_staleness() or 2
-    if B and len(regen) > (S + 3) * B:
-        info["regen_refused"] = f"{len(regen)} groups > {(S + 3)} batches: logs do not match this checkpoint"
-        return None
-    return regen
-
-
-def _groups_from_dataset(ds, gis, n, info):
-    """Rebuild groups exactly as RolloutDataSource.get_samples drew them (one prompt per group, in order, group g at
-    position g mod len(dataset) of its epoch; index = g*n + j).  None if the source does not allow it."""
-    dset = getattr(ds, "dataset", None)
-    samples = getattr(dset, "samples", None)
-    if samples is None:
-        info["regen_refused"] = "source has no dataset"
-        return None
-    L = len(samples)
-    ep, off, G = getattr(ds, "epoch_id", 0), getattr(ds, "sample_offset", None), getattr(ds, "sample_group_index", None)
-    if off is None or G is None or ep * L + off != G:
-        info["regen_refused"] = f"cursor not one prompt per group (epoch {ep} offset {off} groups {G} len {L})"
-        return None
-    shuffled = bool(getattr(getattr(ds, "args", None), "rollout_shuffle", False))
-    out = []
-    for g in gis:
-        e, p = divmod(int(g), L)
-        if shuffled and e != ep:
-            info["regen_refused"] = f"group {g} is from epoch {e} (current {ep}, shuffled)"
-            return None
-        out_g = []
-        for j in range(n):
-            s = copy.deepcopy(samples[p])
-            s.group_index = int(g)
-            s.index = int(g) * n + j
-            out_g.append(s)
-        out.append(out_g)
-    return out
-
-
-# (The out-of-order batch assembly mode `ooo` of the original code base is deprecated - no measured gain - and
-#  is not shipped here; ASRT_STALE_MODE=ooo is refused.)
-
 _TK = [None]
 
 
 def defer_line() -> str:
-    """ startup line of the ticket reader's straggler handling (DEFER / cut / slip)."""
+    """ startup line of the ticket reader's straggler handling (DEFER / cut)."""
     return (f"[asrt] ticket defer: {'on' if _defer_on() else 'off'} (ASRT_TICKET_DEFER="
             f"{os.environ.get('ASRT_TICKET_DEFER', '<default 1>')}); straggler cut ASRT_TICKET_DROP_S="
-            f"{os.environ.get('ASRT_TICKET_DROP_S', 'auto' if _defer_on() else '<off>')}; slip "
-            f"{'on' if os.environ.get('ASRT_TICKET_SLIP', '0') == '1' else 'off'}")
-
-
-def _verl4_on() -> bool:
-    # ASRT_TICKET_DROP=verl4 (verl-window cut) is deprecated and not shipped; the branch below stays dead.
-    return False
+            f"{os.environ.get('ASRT_TICKET_DROP_S', 'auto' if _defer_on() else '<off>')}")
 
 
 def _defer_on() -> bool:
@@ -954,10 +805,7 @@ class TicketBuffer:
         if not ok:
             self._tk.refused += 1
             return []
-        with self._tk.lock:   # legacy resume: prompts the old checkpoint lost go first, in prompt order
-            out = [self._tk.replay.pop(0) for _ in range(min(num_samples, len(self._tk.replay)))]
-        if len(out) < num_samples:
-            out += self._inner.get_samples(num_samples - len(out)) or []
+        out = (self._inner.get_samples(num_samples) or []) if num_samples > 0 else []
         if out:
             self._refresh(out)
             self._tk.admit(out)
@@ -993,14 +841,9 @@ class TicketBuffer:
 _RID = [None]          # rollout id of the generate() call in progress (the worker starts inside the first)
 
 
-def _handout_logs() -> list:
-    v = os.environ.get("ASRT_RESUME_HANDOUT_LOG", "").strip()
-    return [p.strip() for p in v.split(",") if p.strip()]
-
-
 def _resume_tickets(w, tk, raw):
     """ worker start() after slime restored it from a checkpoint (load_state_dict ran first).  Book saved
-    with it -> restore it; checkpoint from an older asrt (no book) -> Tickets.adopt_legacy."""
+    with it -> restore it; checkpoint without a book (plain slime / count mode) -> Tickets.adopt_without_book."""
     if not getattr(w, "_asrt_loaded", False):
         return None
     rid = _RID[0]
@@ -1017,22 +860,14 @@ def _resume_tickets(w, tk, raw):
     else:
         with w.output_queue.mutex:
             queued = list(w.output_queue.queue)
-        logs = _handout_logs()
-        info, regen = tk.adopt_legacy(rid if rid is not None else 0, queued, raw, logs)
-        if regen:
-            with w.output_queue.mutex:   # regenerated from the dataset instead (start version unknown)
-                w.output_queue.queue.clear()
-            info["restored_ready_discarded"] = len(queued)
-        lost = None
-        if not regen:
-            try:  # prompts drawn before the save that are neither in the restored queue nor slime's requeue buffer
-                lost = int(raw.sample_group_index) - int(rid) * tk.B - len(queued) - len(getattr(raw, "buffer", []) or [])
-            except Exception:  # noqa: BLE001
-                lost = None
-            info["lost_estimate"] = lost
-        print(f"[asrt] ticket resume (legacy checkpoint, no asrt book): {json.dumps(info, sort_keys=True)}"
-              + ("" if regen else f"; WARNING about {lost} prompts drawn before the save are lost (set "
-                 f"ASRT_RESUME_HANDOUT_LOG=<previous segments' asrt/admit.jsonl> to regenerate them)"), flush=True)
+        info = tk.adopt_without_book(rid if rid is not None else 0, queued)
+        try:  # prompts drawn before the save that are neither in the restored queue nor slime's requeue buffer
+            lost = int(raw.sample_group_index) - int(rid) * tk.B - len(queued) - len(getattr(raw, "buffer", []) or [])
+        except Exception:  # noqa: BLE001
+            lost = None
+        info["lost_estimate"] = lost
+        print(f"[asrt] ticket resume (checkpoint without an asrt ticket book): {json.dumps(info, sort_keys=True)}"
+              + (f"; WARNING about {lost} prompts drawn before the save are lost" if lost else ""), flush=True)
     if rid is not None:
         _stale_n[0] = int(rid)
     _log({"event": "resume", "t": time.time(), "rollout": rid, **{k: v for k, v in (info or {}).items()}})
@@ -1042,36 +877,9 @@ def _resume_tickets(w, tk, raw):
 
 
 _worker_patched = False
-_CTR = [None]          # live AdmitCounter (staleness controller adjusts its cap)
+_CTR = [None]          # live AdmitCounter (count mode)
 _COLLECT = {"on": False, "deferred": 0}   # groups popped during the current batch collection
 _ACTIVE = {}           # reader -> group budget the staleness ceiling is enforced with (verified after rollout 0)
-_FILL = {"f": 0.0, "base": None, "hist": []}
-
-
-def _fill_mode() -> str:
-    # ASRT_STALE_FILL (closed-loop extra fill) is deprecated (no measured gain, exceeded the ceiling) and not shipped.
-    return "off"
-
-
-def _adapt_cap(rec: dict):
-    """ closed loop under the hard ceiling: the batch-count cap is a conservative proxy for the staleness
-    bound (it rarely reaches S, so engines idle on the long tail).  Extra fill f (0..1 batch) rises by 1/4 batch while
-    the measured max stays <= S-1, holds at max == S, and drops by 1/2 batch on any sample over S."""
-    ctr = _CTR[0]
-    S = max_staleness()
-    if ctr is None or S is None or _fill_mode() in ("0", "off", "no") or _FILL["base"] is None:
-        return
-    if (rec.get("rollout") or 0) < 2:  # warm-up rollouts are fresh by construction: no evidence of headroom
-        return
-    over = rec.get("frac_over_cap", 0) > 0
-    _FILL["hist"].append(rec.get("max", S))
-    if over:
-        _FILL["f"] = max(0.0, _FILL["f"] - 0.5)
-    elif len(_FILL["hist"]) >= 2 and max(_FILL["hist"][-2:]) <= S - 1:
-        _FILL["f"] = min(float(os.environ.get("ASRT_STALE_FILL_MAX", "1.0")), _FILL["f"] + 0.25)
-    new = max(1, int(round(_FILL["base"] + _FILL["f"] * ctr.batch)))
-    rec["fill_f"], rec["cap_groups_next"] = _FILL["f"], new
-    ctr.cap = new
 
 
 def _install_filter_refund(far):
@@ -1131,8 +939,6 @@ def install_worker_cap(args) -> bool:
 
     def start(self):
         if _ticket_mode() and not isinstance(self.data_buffer, TicketBuffer):
-            if _ooo_mode():
-                raise RuntimeError("ASRT_STALE_MODE=ooo is deprecated and not shipped in ai_search_plugin")
             tk = Tickets(self.args.rollout_batch_size, S)
             tk.n_rollout = getattr(self.args, "num_rollout", None)   # run length for the whole-run cut budget
             tk.start_engine_poll(self.args)
@@ -1142,16 +948,14 @@ def install_worker_cap(args) -> bool:
             raw = self.data_buffer
             self.data_buffer = TicketBuffer(self.data_buffer, tk)
             _resume_tickets(self, tk, raw)   # no-op unless slime restored this worker from a checkpoint
-            if True:
-                print(f"[asrt] slime_admit ticket mode: batch {tk.B}, max staleness {S} verl units (group of batch t "
-                      f"starts only while t - (v_now - v0) <= {S}, handed out in batch t); slime in-flight cap "
-                      f"{self.concurrency} groups", flush=True)
-                print(defer_line(), flush=True)
+            print(f"[asrt] slime_admit ticket mode: batch {tk.B}, max staleness {S} verl units (group of batch t "
+                  f"starts only while t - (v_now - v0) <= {S}, handed out in batch t); slime in-flight cap "
+                  f"{self.concurrency} groups", flush=True)
+            print(defer_line(), flush=True)
             return orig_start(self)
         if not _ticket_mode() and not isinstance(self.data_buffer, GatedBuffer):
             self._asrt_ctr = AdmitCounter(self.args.rollout_batch_size, ahead)
             _CTR[0] = self._asrt_ctr
-            _FILL["base"] = self._asrt_ctr.cap
             _ACTIVE["single-process"] = self._asrt_ctr.cap
             self.data_buffer = GatedBuffer(self.data_buffer, self._asrt_ctr)
             if getattr(self, "_asrt_loaded", False):   # restored completed groups are admitted, not handed
@@ -1222,8 +1026,7 @@ def install_worker_cap(args) -> bool:
             st["asrt"] = {"v": 1, "mode": "ticket", "book": book,
                           "stale_n": _stale_n[0], "vfirst": _vfirst[0], "buf_saved": len(extra)}
             _log({"event": "resume_save", "t": time.time(), "m": tk.m, "ready": len(st["ready"]),
-                  "buf_saved": len(extra), "v0": tk.v0, "vmax": tk.vmax, "floor": book.get("resume_floor"),
-                  "replay": len(book.get("replay") or [])})
+                  "buf_saved": len(extra), "v0": tk.v0, "vmax": tk.vmax, "floor": book.get("resume_floor")})
             print(f"[asrt] slime_admit save: batch counter {tk.m}, {len(st['ready'])} completed groups "
                   f"({len(extra)} from the ticket buffer), versions v0 {tk.v0} max {tk.vmax}", flush=True)
         elif getattr(self, "_asrt_ctr", None) is not None:
@@ -1492,7 +1295,6 @@ def install_staleness_log() -> bool:
             rec = staleness_summary(samples, current_weight_version, S, rid) if current_weight_version is not None else None
             if rec is not None:
                 rec["rollout"] = rid
-                _adapt_cap(rec)
                 out["staleness/frac_over_cap"] = rec["frac_over_cap"]
                 if rec.get("tok_max") is not None:   # token-level (start-version) basis
                     out["staleness/tok_max"] = rec["tok_max"]
@@ -1501,7 +1303,7 @@ def install_staleness_log() -> bool:
                 print(SC.staleness_line(rid, rec['mean'], rec['max'], S, rec['frac_over_cap'], f" (n {rec['n']}, token-level "
                       f"max {rec.get('tok_max')} mean {rec.get('tok_mean')} over {rec.get('tok_frac_over_cap')}; train version "
                       f"{rec['train_version']}; slime metric mean {rec['slime_mean']} max {rec['slime_max']} "
-                      f"unknown {rec['slime_unknown']}; next cap {rec.get('cap_groups_next', '-')} groups, fill {rec.get('fill_f', '-')})"),
+                      f"unknown {rec['slime_unknown']})"),
                       flush=True)
                 _log({"event": "staleness", "rollout": rid, "t": time.time(), **rec})
         except Exception as e:  # never break the metric path
@@ -1644,7 +1446,7 @@ def _verify_ceiling(args, evaluation=False):
                            f"{getattr(args, 'rollout_data_transport', None)}) - refusing to run uncapped")
     B = int(getattr(args, "rollout_batch_size", 0) or 0)
     desc = ", ".join(f"{k}: {v} groups ({v / B:.2f} batches)" if B else f"{k}: {v} groups" for k, v in _ACTIVE.items())
-    mode = "ooo" if _ooo_mode() else ("ticket" if _ticket_mode() else "count")
+    mode = "ticket" if _ticket_mode() else "count"
     print(SC.active_line(S, f"mode {mode}, overlap driver {_overlap_driver()}, reader {desc}"), flush=True)
     _log({"event": "ceiling_active", "t": time.time(), "S": S, "readers": dict(_ACTIVE), "batch": B, "mode": mode})
 

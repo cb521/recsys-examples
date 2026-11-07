@@ -364,7 +364,7 @@ def _install_response_logits():
 _RL = {"compact": 0, "stock": 0}
 
 
-def _rlogits_kept_rows(loss_mask, response_attention_mask=None):
+def _rlogits_kept_rows(loss_mask):
     """Response rows that carry loss in this micro-batch, for nested loss_mask only (None otherwise): loss_mask sum,
     i.e. tool / search-result tokens inside the response are not counted (multi-turn responses are mostly tool
     output). Padded loss_mask ([b, R], verl v1's left_right_2_no_padding path) returns None = keep the compact path,
@@ -411,7 +411,7 @@ def _guard_response_logits():
             try:
                 a = sig.bind(*args, **kwargs).arguments
                 lpa = a.get("logits_processor_args") or {}
-                kept = _rlogits_kept_rows(lpa.get("loss_mask"), lpa.get("response_attention_mask"))
+                kept = _rlogits_kept_rows(lpa.get("loss_mask"))
                 ids = a.get("input_ids")
                 if kept is not None and getattr(ids, "is_nested", False):
                     use = kept <= thr * max(1, ids.values().numel())
@@ -463,55 +463,54 @@ def install(features=None) -> set:
 
 
 def _install_one(f):
-    if True:
-        if f in ("response_logits", "rlogits"):
-            _install_response_logits()
-            _INSTALLED.add("response_logits")
-        elif f == "jitcache":
-            from . import jitcache
-            jitcache.install()
-            _INSTALLED.add(f)
-        elif f == "toolcache":
-            install_tool_cache()
-        elif f == "balance":
-            q = float(os.environ.get("ASRT_VERL_QUAD", 0.0))
-            install_balanced_partitions(q)
-        elif f == "place":  # expert re-placement (verl_placement; Megatron engine, MoE only, auto-off when balanced)
-            from .verl_placement import install as install_place
-            install_place()
-            _INSTALLED.add(f)
-        elif f == "sglhooks":
-            from .verl_engine import install_sglhooks
-            install_sglhooks()
-            _INSTALLED.add(f)
-        elif f == "inplace":
-            from .verl_engine import install_inplace
-            install_inplace()
-            _INSTALLED.update({"inplace", "keepkv", "sglhooks"})
-        elif f == "ceiling":  # staleness ceiling S (verl_ceiling)
-            from .verl_ceiling import install as install_ceiling
-            install_ceiling()
-            _INSTALLED.add(f)
-        elif f == "offpol":  # measurement only: submitted / trained / dropped per step (verl_offpol)
-            from .verl_offpol import install as install_offpol
-            install_offpol()
-            _INSTALLED.add(f)
-        elif f == "kvfresh":  # checked flush + earliest version (verl_rollout.install_kvfresh)
-            if _INSTALLED & {"keepkv", "inplace"}:
-                raise RuntimeError("asrt verl kvfresh: keepkv/inplace keep old-weight KV on purpose; drop them "
-                                   "(ASRT_VERL_DROP=keepkv,inplace)")
-            from . import verl_rollout
-            verl_rollout.install_kvfresh()
-            _INSTALLED.add(f)
-        elif f == "kvprobe":  # measurement only (kvsync / kvcall logs)
-            from . import verl_rollout
-            verl_rollout.install_kvprobe()
-            _INSTALLED.add(f)
-        elif f in ("route", "keepkv", "tokcache", "profile"):
-            from . import verl_rollout
-            getattr(verl_rollout, "install_" + f)()
-            _INSTALLED.add(f)
-        else:
-            raise ValueError(f"unknown asrt verl feature {f!r}")
+    if f in ("response_logits", "rlogits"):
+        _install_response_logits()
+        _INSTALLED.add("response_logits")
+    elif f == "jitcache":
+        from . import jitcache
+        jitcache.install()
+        _INSTALLED.add(f)
+    elif f == "toolcache":
+        install_tool_cache()
+    elif f == "balance":
+        q = float(os.environ.get("ASRT_VERL_QUAD", 0.0))
+        install_balanced_partitions(q)
+    elif f == "place":  # expert re-placement (verl_placement; Megatron engine, MoE only, auto-off when balanced)
+        from .verl_placement import install as install_place
+        install_place()
+        _INSTALLED.add(f)
+    elif f == "sglhooks":
+        from .verl_engine import install_sglhooks
+        install_sglhooks()
+        _INSTALLED.add(f)
+    elif f == "inplace":
+        from .verl_engine import install_inplace
+        install_inplace()
+        _INSTALLED.update({"inplace", "keepkv", "sglhooks"})
+    elif f == "ceiling":  # staleness ceiling S (verl_ceiling)
+        from .verl_ceiling import install as install_ceiling
+        install_ceiling()
+        _INSTALLED.add(f)
+    elif f == "offpol":  # measurement only: submitted / trained / dropped per step (verl_offpol)
+        from .verl_offpol import install as install_offpol
+        install_offpol()
+        _INSTALLED.add(f)
+    elif f == "kvfresh":  # checked flush + earliest version (verl_rollout.install_kvfresh)
+        if _INSTALLED & {"keepkv", "inplace"}:
+            raise RuntimeError("asrt verl kvfresh: keepkv/inplace keep old-weight KV on purpose; drop them "
+                               "(ASRT_VERL_DROP=keepkv,inplace)")
+        from . import verl_rollout
+        verl_rollout.install_kvfresh()
+        _INSTALLED.add(f)
+    elif f == "kvprobe":  # measurement only (kvsync / kvcall logs)
+        from . import verl_rollout
+        verl_rollout.install_kvprobe()
+        _INSTALLED.add(f)
+    elif f in ("route", "keepkv", "tokcache", "profile"):
+        from . import verl_rollout
+        getattr(verl_rollout, "install_" + f)()
+        _INSTALLED.add(f)
+    else:
+        raise ValueError(f"unknown asrt verl feature {f!r}")
 
 

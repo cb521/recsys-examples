@@ -65,8 +65,7 @@ def _fill_on() -> bool:
 
 
 def _ticket_mode(S) -> bool:
-    # ooo (out-of-order assembly, deprecated) uses the same version-window admission as ticket mode -> same S+1-batch pool
-    return S is not None and os.environ.get("ASRT_STALE_MODE", "ticket").strip().lower() in ("ticket", "ooo")
+    return S is not None and os.environ.get("ASRT_STALE_MODE", "ticket").strip().lower() == "ticket"
 
 
 def cap_batches(S: int | None, overlap: bool) -> float | None:

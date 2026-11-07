@@ -529,7 +529,6 @@ def _patch(uwd, opts: set, depth: int):
     Cls._asrt_orig = (orig_update_weights, orig_send, orig_bucket)
     flatten = "flatten" in opts
     pipeline = "pipeline" in opts
-    profile = "profile" in opts or pipeline or flatten
     async_ = "async" in opts
     no_pause = "no_pause" in opts or async_
     flatten = flatten or async_

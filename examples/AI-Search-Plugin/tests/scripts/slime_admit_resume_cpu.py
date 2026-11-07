@@ -18,8 +18,7 @@ Checks (each fails on an older slime_admit without the resume book):
   * versions: B's staleness records continue the train version of A (A's rollout s+1 reference = B's), token-
     level max <= S;
   * a version counter that restarts after the resume is flagged (ledger BAD), not silently accepted;
-  * legacy checkpoint (no asrt book, old code): with the previous segment's admit.jsonl every lost prompt is
-    generated again in prompt order (continuity + ledger OK); without it the ledger still balances;
+  * checkpoint without the asrt book (slime's own worker state): the ledger still balances;
   * no resume: the worker's saved state is slime's {"ready": ...} plus the book (no change to the run).
 usage: python3 tests/scripts/slime_admit_resume_cpu.py   (or pytest)
 """
@@ -30,7 +29,6 @@ import pickle
 import random
 import sys
 import tempfile
-import threading
 import time
 from types import SimpleNamespace
 
@@ -160,7 +158,7 @@ def _recs(log_dir):
 
 
 def _outstanding(sa, mgr):
-    """Group indices admitted but not handed at the end (pending / buffered / queued / requeued / replay)."""
+    """Group indices admitted but not handed at the end (pending / buffered / queued / requeued)."""
     w = mgr.data_source.consumers["fully_async"]
     tk = sa._TK[0]
     gis = set()
@@ -169,16 +167,15 @@ def _outstanding(sa, mgr):
             gis |= {k[1] // w.args.n_samples_per_prompt for k in ks if k[0] == "i"}
         for lst in tk.buf.values():
             gis |= {g[0].group_index for _, g in lst}
-        gis |= {g[0].group_index for g in getattr(tk, "replay", [])}
     with w.output_queue.mutex:
         gis |= {g[0].group_index for _, g in w.output_queue.queue}
     gis |= {g[0].group_index for g in mgr.data_source.buffer}
     return gis
 
 
-def run_resume(B=8, n=2, conc=40, s=3, overrun=2, N=8, S=2, train_s=0.08, version_reset=False, legacy=None,
+def run_resume(B=8, n=2, conc=40, s=3, overrun=2, N=8, S=2, train_s=0.08, version_reset=False, no_book=False,
                seed=0):
-    """legacy: None (book saved), 'log' (book stripped, previous admit.jsonl given), 'nolog' (book stripped)."""
+    """no_book: strip the asrt book from the saved worker state (what plain slime saves)."""
     random.seed(seed)
     SIM.version, SIM.epoch, SIM.gen_s, SIM.flush1, SIM.slow, SIM.slow_s = 0, 0, (0.01, 0.05), True, set(), 0.0
     SIM.slow = {i for i in range(200) if i % 7 == 3}
@@ -200,13 +197,12 @@ def run_resume(B=8, n=2, conc=40, s=3, overrun=2, N=8, S=2, train_s=0.08, versio
     mgr.data_source.consumers["fully_async"].close()
     staleA = [r for r in _recs(dA) if r.get("event") == "staleness"]
     state = pickle.loads(saved[0])
-    if legacy:   # what an older version saved: slime's queue only, the ticket buffer and the book missing
+    if no_book:   # slime's queue only, the ticket buffer and the book missing
         w = state["consumers"]["fully_async"]
         book = w.pop("asrt")
         w["ready"] = w["ready"][book["buf_saved"]:]
     # ---------------------------------------------------------------- segment B (new process)
-    extra = {"ASRT_RESUME_HANDOUT_LOG": os.path.join(dA, "admit.jsonl")} if legacy == "log" else None
-    _env(S, dB, extra)
+    _env(S, dB)
     SIM.version = 1 if version_reset else v_at_save
     mgr, sa, far = _process(B, n, conc, N)
     mgr.data_source.load_state_dict(state)
@@ -277,23 +273,10 @@ def test_resume_version_reset_flagged():
     assert any(not x.get("ok") for x in r.ledgerB)
 
 
-def test_resume_legacy_with_log():
-    r = run_resume(legacy="log")
-    _check_continuity(r)
+def test_resume_no_book_balances():
+    r = run_resume(no_book=True)
     _check_ledger(r)
-    assert r.resumeB[0]["mode"] == "legacy" and r.resumeB[0].get("regenerated", 0) > 0, r.resumeB
-    # regenerated in prompt order: B's first batch starts at the lowest group not handed before the save
-    lo = min(set(range(r.cursorA)) - set(g for o in r.outA[:r.s + 1] for g in o["groups"]))
-    assert r.resumeB[0]["first_regenerated_gi"] == lo
-    tm = [x["tok_max"] for x in r.staleB if x.get("tok_max") is not None]
-    assert tm and max(tm) <= r.S, tm
-    print(f"  legacy+log: regenerated {r.resumeB[0]['regenerated']} groups from {lo}; ledger OK; tok_max {max(tm)}")
-
-
-def test_resume_legacy_nolog_balances():
-    r = run_resume(legacy="nolog")
-    _check_ledger(r)
-    assert r.resumeB[0]["mode"] == "legacy" and r.resumeB[0].get("adopted", 0) > 0
+    assert r.resumeB[0]["mode"] == "no_book" and r.resumeB[0].get("adopted", 0) > 0
 
 
 def test_no_resume_state_is_slime_plus_book():
@@ -360,28 +343,6 @@ def test_resume_seed_version():
             sys.modules.pop(key, None)
         else:
             sys.modules[key] = saved
-
-
-def test_legacy_log_offsets_per_process():
-    """One admit.jsonl appended by two old processes (batches counted from 0 in each): rows map to slime rollout
-    ids per process block; rows (hand-outs and cuts) at or after the resume rollout do not count."""
-    from ai_search_plugin.adapters import slime_admit as sa
-    d = tempfile.mkdtemp(prefix="reslog")
-    p = os.path.join(d, "admit.jsonl")
-    rows = []
-    # process 1: rollouts 0, 1 (m 1, 2); process 2 resumed at rollout 2: its batches 0, 1 = rollouts 2, 3
-    for proc, start in ((1, 0), (2, 2)):
-        for b in range(2):
-            rows.append({"event": "ticket_handout", "batch": b, "groups": [[(start + b) * 4 + j, 0, b] for j in range(4)]})
-            if proc == 2 and b == 1:
-                rows.append({"event": "ticket_drop", "batch": b, "sample_index": 13 * 2})   # cut in rollout 3 (after the save)
-            rows.append({"event": "ticket", "rollout": start + b, "m": b + 1})
-    with open(p, "w") as f:
-        f.write("\n".join(json.dumps(r) for r in rows) + "\n")
-    ds = SimpleNamespace(sample_group_index=24, args=SimpleNamespace(n_samples_per_prompt=2, rollout_batch_size=4))
-    info = {}
-    regen = sa._legacy_regen_set(3, ds, [p], info)   # resume at rollout 3: rollouts 0..2 were trained
-    assert regen == list(range(12, 24)), (regen, info)   # rollout 3: hand-out and cut (gi 13) do not count
 
 
 if __name__ == "__main__":

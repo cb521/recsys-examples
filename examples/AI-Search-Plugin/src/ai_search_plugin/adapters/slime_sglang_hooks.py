@@ -194,8 +194,6 @@ class _Plan:
 
 def _build_plan(copies, fallback, n_inputs, params, nbytes):
     """copies: list of (dst_view, src_dtype, src_off, src_size, src_stride) in record order."""
-    import torch
-
     plan = _Plan()
     plan.fallback = sorted(fallback)
     plan.params = params

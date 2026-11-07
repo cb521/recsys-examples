@@ -263,7 +263,7 @@ def run(admit, train_s, steps=8, B=8, n=4, conc=64, engines=2, convert_s=0.15, a
     os.environ.pop("ASRT_LOG_DIR", None)
     if log_dir:
         os.environ["ASRT_LOG_DIR"] = log_dir
-    far = _stub_slime()
+    _stub_slime()
     sys.modules.pop("ai_search_plugin.adapters.slime_admit", None)
     Mgr = make_manager_class(convert_s)  # class must exist before slime_admit is imported (it patches live classes)
     args = SimpleNamespace(rollout_batch_size=B, n_samples_per_prompt=n, sglang_server_concurrency=conc, engines=engines,
@@ -366,17 +366,13 @@ def test_max_staleness_ceiling():
     # overlap driver (asrt slime_prefetch hands batch i+1 out during the sync after train(i)): S -> (S-1) batches
     os.environ["ASRT_PREFETCH"] = "overlap,r3c,profile"
     try:
-        os.environ["ASRT_STALE_FILL"] = "off"
         r = run("", train_s=0.3, B=B, steps=4, max_staleness="2")
         assert r.peak <= B and r.stale_max <= 2, (r.peak, r.stale_max)
-        # closed loop (default): this serial fake never reaches 2 with 1 batch outstanding -> fill rises, max stays <= 2
-        os.environ["ASRT_STALE_FILL"] = "auto"  # opt-in
         r = run("", train_s=0.6, B=B, steps=8, max_staleness="2")
         assert r.peak <= 3 * B and r.stale_max <= 2, (r.peak, r.stale_max)
-        print(f"overlap mapping S=2: fill off peak <= {B}; closed loop peak {r.peak}, staleness max {r.stale_max}")
+        print(f"overlap mapping S=2: peak <= {B}; longer run peak {r.peak}, staleness max {r.stale_max}")
     finally:
         os.environ.pop("ASRT_PREFETCH", None)
-        os.environ.pop("ASRT_STALE_FILL", None)
         os.environ.pop("ASRT_STALE_MODE", None)
 
 
@@ -472,7 +468,7 @@ def test_ticket_defer():
     assert dfr.stale_max <= 2, dfr.stale_max
     assert st["deferred"] > 0, st
     assert st["dropped"] <= st_cut["dropped"], (st_cut, st)
-    assert dfr.total <= cut.total * 1.15, (cut.total, dfr.total, {k: st_cut[k] for k in ("dropped","slipped","refused")}, {k: st[k] for k in ("dropped","deferred","refused","stale_requeue")})
+    assert dfr.total <= cut.total * 1.15, (cut.total, dfr.total, {k: st_cut[k] for k in ("dropped","refused")}, {k: st[k] for k in ("dropped","deferred","refused","stale_requeue")})
     print(f"ticket defer: total {cut.total:.2f} -> {dfr.total:.2f} s, dropped {st_cut['dropped']} -> {st['dropped']}, "
           f"deferred {st['deferred']}, staleness max {dfr.stale_max}")
 
@@ -482,7 +478,7 @@ def test_ticket_defer():
 def test_ticket_ratio_budget():
     """ ASRT_TICKET_DROP=ratio:<p>: only groups that ran >= ASRT_TICKET_SLOW_S count as slow and may be cut;
     cuts <= floor(p x slow groups so far)."""
-    import time as _tm, types as _t
+    import types as _t
     from ai_search_plugin.adapters import slime_admit as sa
     mk = lambda gi: [_t.SimpleNamespace(index=gi * 4 + j, group_index=gi, weight_versions=["0"]) for j in range(4)]
     os.environ.update(ASRT_TICKET_DROP="ratio:1", ASRT_TICKET_SLOW_S="0.2", ASRT_TICKET_DEFER="1")
@@ -604,7 +600,7 @@ def _requeue_replay(mode):
             def add_samples(self, groups):
                 self.q = list(groups) + self.q
 
-        tk = (sa.OooTickets if mode == "ooo" else sa.Tickets)(4, 2)
+        tk = sa.Tickets(4, 2)
         inner = Inner()
         tb = sa.TicketBuffer(inner, tk)
         ver = [0]
@@ -682,7 +678,7 @@ def _flush1_run(mode, steps=14, slow_s=0.9):
         os.environ.pop("ASRT_STALE_MODE", None)
     recs = [json.loads(x) for x in open(os.path.join(d, "admit.jsonl"))]
     st = [x for x in recs if x.get("event") == "staleness"]
-    tick = [x for x in recs if x.get("event") in ("ticket", "ooo_batch")]
+    tick = [x for x in recs if x.get("event") == "ticket"]
     return r, st, tick, recs
 
 

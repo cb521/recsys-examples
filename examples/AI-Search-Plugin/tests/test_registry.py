@@ -60,13 +60,6 @@ def test_resolve_rules():
         R.resolve("slime", ["no_such_component"])
 
 
-def test_deprecated_env_refused():
-    assert R.deprecated_env_in({"ASRT_STALE_MODE": "ticket", "ASRT_TICKET_SLOWTOOL_S": "0"}) == []
-    assert R.deprecated_env_in({"ASRT_STALE_MODE": "ooo"}) == ["ASRT_STALE_MODE"]
-    with pytest.raises(RuntimeError):
-        asp.install("slime", "default", environ={"ASRT_TICKET_SLIP": "1"})
-
-
 def test_slime_plan_default():
     env = {}
     p = asp.install("slime", "default", options={"toolcache_generate": "my_agent.generate",

@@ -6,7 +6,6 @@ V = {"a": 3, "b": 2}
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
-        port = self.server.server_address[1]
         if self.path == "/workers":
             body = {"workers": [{"url": f"http://127.0.0.1:{e.server_address[1]}"} for e in ENG]}
         else:

@@ -42,12 +42,6 @@ def install(framework: str, components="default", options: Optional[dict] = None
     framework's own processes through the hooks in ``plan.args`` (slime) or ``VERL_USE_EXTERNAL_MODULES`` (verl);
     pass ``patch_now=True`` for verl to also patch the current process.
     """
-    import os
-
-    from .registry import DEPRECATED_ENV, deprecated_env_in
-    bad = deprecated_env_in(os.environ if environ is None else environ)
-    if bad:
-        raise RuntimeError(f"ai_search_plugin: deprecated switches set: {bad} ({[DEPRECATED_ENV[b] for b in bad]})")
     if framework == "slime":
         from .frameworks import slime as F
         return F.install(components, options, environ)
