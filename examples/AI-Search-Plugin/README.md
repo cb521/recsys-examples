@@ -6,7 +6,7 @@ Drop-in components that make **RL post-training of search agents** (AI search / 
 
 > Early release for review. The speed-ups below were measured with the original implementation this package was ported from. Some components are still stubs, and the tests here are CPU-only. Per-run details: [EXPERIMENTS.md](EXPERIMENTS.md).
 
-On five workloads against each framework's fastest config: 1.17–1.56× faster on four, a tie on one. See [section 4](#4-performance-speed-ups-and-where-time-goes).
+On five workloads against each framework's fastest config: on four, the same training takes 14–36% less time (1.17–1.56× faster); one is a tie. See [section 4](#4-performance-speed-ups-and-where-time-goes).
 
 ---
 
@@ -121,13 +121,13 @@ Three open-source small models (Search-R1, ASearcher, Libra) and one large model
 - The baseline is the fastest config of that framework we could find that keeps samples at most 2 steps stale.
 - Every row was independently reviewed.
 
-| Workload | Hardware | Baseline | Speed-up [95% CI] (pairs) | Notes |
-|---|---|---|---|---|
-| Search-R1 (Qwen2.5-7B) | 1× B300 | slime (5 training + 3 rollout GPUs) | **1.170×** [1.164, 1.177] (2) | All checks pass. Mostly from computing only the response part (×1.116) and prefetch (×1.033) |
-| Search-R1 (Qwen2.5-7B) | 1× B300 | verl (colocated async) | **1.002×** [0.984, 1.021] (8), **tie** | 4.6% slower per step, but trains 6.8% more tokens per step. Two checks failed: amount trained, first-3-step reward (at threshold). The baseline may drop over-age samples; not proven. `toolcache` did not activate here |
-| ASearcher (Qwen2.5-7B) | 1× B300 | verl best config (colocated async) | **1.167×** [1.131, 1.208] (4) | verl may occasionally exceed "2 steps stale" (estimated 0.002–0.16% of trajectories), which favors verl. Against slime: 1.299× (reference only) |
-| Libra (Qwen3-14B) | 1× B200 | slime best config + our ticket admission | **1.219×** [1.133, 1.310] (6) | Without ticket admission slime must drop to concurrency 8 to stay within the bound, so the baseline gets it too; this number excludes its gain. The gain comes from the combination; single components are mostly within noise |
-| Qwen3-Next (80B-A3B) | 4× B300 | verl best config (separate async, partial rollout, routing replay) | **1.560×** [1.389, 1.719] (4) | See below |
+| Workload | Hardware | Baseline | Time saved for the same training | Speed-up [95% CI] (pairs) | Notes |
+|---|---|---|---|---|---|
+| Search-R1 (Qwen2.5-7B) | 1× B300 | slime (5 training + 3 rollout GPUs) | ~15% | **1.170×** [1.164, 1.177] (2) | All checks pass. Mostly from computing only the response part (×1.116) and prefetch (×1.033) |
+| Search-R1 (Qwen2.5-7B) | 1× B300 | verl (colocated async) | tie | **1.002×** [0.984, 1.021] (8), **tie** | 4.6% slower per step, but trains 6.8% more tokens per step. Two checks failed: amount trained, first-3-step reward (at threshold). The baseline may drop over-age samples; not proven. `toolcache` did not activate here |
+| ASearcher (Qwen2.5-7B) | 1× B300 | verl best config (colocated async) | ~14% | **1.167×** [1.131, 1.208] (4) | verl may occasionally exceed "2 steps stale" (estimated 0.002–0.16% of trajectories), which favors verl. Against slime: 1.299× (reference only) |
+| Libra (Qwen3-14B) | 1× B200 | slime best config + our ticket admission | ~18% | **1.219×** [1.133, 1.310] (6) | Without ticket admission slime must drop to concurrency 8 to stay within the bound, so the baseline gets it too; this number excludes its gain. The gain comes from the combination; single components are mostly within noise |
+| Qwen3-Next (80B-A3B) | 4× B300 | verl best config (separate async, partial rollout, routing replay) | ~36% | **1.560×** [1.389, 1.719] (4) | See below |
 
 **Qwen3-Next caveats**
 1. **One scenario only**: the search tool is simulated (slow at times, timeouts, errors: scenario f in section 2), so rewards show a trend only. Scaled-down layout: 2 training + 2 rollout nodes, 64 prompts × 8 answers.
