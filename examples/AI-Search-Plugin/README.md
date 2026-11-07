@@ -1,5 +1,7 @@
 # AI-Search-Plugin
 
+English | [中文](README.zh-CN.md)
+
 Drop-in components that speed up and stabilize **RL post-training of search agents** (AI search / deep-research models) on existing RL frameworks such as slime and verl.
 
 > Status: early release for review.
