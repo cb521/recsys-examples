@@ -129,12 +129,12 @@ GPU 只替换"计算"这一步。Flink 作业的时间大头在序列化和交�
 
 | 用例 | 做什么（场景） | 结论（调优后，打满档） | 链接 |
 | --- | --- | --- | --- |
-| c1 过滤清洗 | 按时长、播放、随机曝光等条件过滤，并计算观看比例、时长分桶、互动次数（样本清洗） | CPU 更快：2.47M 对 2.06M 条/秒（CPU +20%）；低/中档延迟 CPU <0.01 ms，GPU 约 3 ms | [c1](benchmarks/README.zh-CN.md#c1-过滤清洗) |
-| c2 窗口聚合 | 每用户最近 30 分钟（5 分钟步长 HOP）及 5 分钟 TUMBLE 的曝光数、点击数、播放时长（实时统计特征） | GPU 更快：HOP 两阶段 1.86M 对 1.48M（GPU +26%），TUMBLE 2.02M 对 1.61M（GPU +25%）；延迟也更低 | [c2](benchmarks/README.zh-CN.md#c2-每用户最近-30-分钟点击数的窗口聚合hop-与-tumble) |
-| c3 每用户 TopN | 每个用户观看时长最长的 10 条，ROW_NUMBER（Top-K 行为特征） | CPU 更快：1.36M 对 1.23M（CPU +11%）；并行度 2/4 下 CPU +38% / +21%。GPU 大部分时间空闲，瓶颈在 JVM 侧 | [c3](benchmarks/README.zh-CN.md#c3-每用户观看最久的前-10-个视频topn) |
-| c4 keep-last 去重 | 按 (user_id, video_id) 保留最新一条（样本去重） | CPU 更快：1.03M 对 0.85M（CPU +22%） | [c4](benchmarks/README.zh-CN.md#c4-keep-last-去重) |
-| c5 Interval Join 及融合 | 曝光流与点击流在 30 分钟区间内 join；另测后接 Filter、后接聚合，GPU 上多步融合（曝光-点击归因） | 吞吐 CPU 更快：join +15%、join-filter +17%、join-agg +24%；接聚合时 GPU 延迟 p50 低约 23%。融合在调优后没有吞吐收益，仅 join-agg 延迟略低 | [c5](benchmarks/README.zh-CN.md#c5-曝光--点击-interval-join及后接-filter--聚合的融合) |
-| c6 Lookup Join | 事件流查视频维表，取 author_id，INNER（物品侧特征拼接） | GPU 更快：2.28M 对 1.30M（GPU +76%）；维表只装了 104 万行，未测全量；LEFT 在本构建不能上 GPU | [c6](benchmarks/README.zh-CN.md#c6-查特征维表-lookup-join) |
+| c1 过滤清洗 | 按时长、播放、随机曝光等条件过滤，并计算观看比例、时长分桶、互动次数（样本清洗） | CPU 更快：2.47M 对 2.06M 条/秒（CPU +20%）；低/中档延迟 CPU <0.01 ms，GPU 约 3 ms | [c1](benchmarks/group2-cpu-wins.zh-CN.md#c1-filter) |
+| c2 窗口聚合 | 每用户最近 30 分钟（5 分钟步长 HOP）及 5 分钟 TUMBLE 的曝光数、点击数、播放时长（实时统计特征） | GPU 更快：HOP 两阶段 1.86M 对 1.48M（GPU +26%），TUMBLE 2.02M 对 1.61M（GPU +25%）；延迟也更低 | [c2](benchmarks/group1-gpu-wins.zh-CN.md#c2-window) |
+| c3 每用户 TopN | 每个用户观看时长最长的 10 条，ROW_NUMBER（Top-K 行为特征） | CPU 更快：1.36M 对 1.23M（CPU +11%）；并行度 2/4 下 CPU +38% / +21%。GPU 大部分时间空闲，瓶颈在 JVM 侧 | [c3](benchmarks/group2-cpu-wins.zh-CN.md#c3-topn) |
+| c4 keep-last 去重 | 按 (user_id, video_id) 保留最新一条（样本去重） | CPU 更快：1.03M 对 0.85M（CPU +22%） | [c4](benchmarks/group2-cpu-wins.zh-CN.md#c4-dedup) |
+| c5 Interval Join 及融合 | 曝光流与点击流在 30 分钟区间内 join；另测后接 Filter、后接聚合，GPU 上多步融合（曝光-点击归因） | 吞吐 CPU 更快：join +15%、join-filter +17%、join-agg +24%；接聚合时 GPU 延迟 p50 低约 23%。融合在调优后没有吞吐收益，仅 join-agg 延迟略低 | [c5](benchmarks/group2-cpu-wins.zh-CN.md#c5-join) |
+| c6 Lookup Join | 事件流查视频维表，取 author_id，INNER（物品侧特征拼接） | GPU 更快：2.28M 对 1.30M（GPU +76%）；维表只装了 104 万行，未测全量；LEFT 在本构建不能上 GPU | [c6](benchmarks/group1-gpu-wins.zh-CN.md#c6-lookup) |
 
 一句话归纳：本次数据下，GPU 在窗口聚合（c2）和维表查询（c6）上有收益。过滤、TopN、去重、Interval Join 上 CPU 不输，因为成本在序列化、JVM 状态读写和行列转换。这是单卡、并行度主要为 1 的结果。
 
@@ -146,7 +146,9 @@ GPU 只替换"计算"这一步。Flink 作业的时间大头在序列化和交�
 | [docs/bottlenecks.zh-CN.md](docs/bottlenecks.zh-CN.md) | 完整的瓶颈清单，含公开证据和我们的实测 |
 | [docs/related-work.zh-CN.md](docs/related-work.zh-CN.md) | 其他项目怎么加速 Flink，每个一张流程图 |
 | [docs/images/](docs/images) | 这些页面用到的图 |
-| [benchmarks/README.zh-CN.md](benchmarks/README.zh-CN.md) | 六个测试用例的方法、结果和局限 |
+| [benchmarks/README.zh-CN.md](benchmarks/README.zh-CN.md) | 方法、汇总、局限和复现说明 |
+| [benchmarks/group1-gpu-wins.zh-CN.md](benchmarks/group1-gpu-wins.zh-CN.md) | GPU 赢的两个用例（c2、c6）：SQL、真实计划、证据、结果 |
+| [benchmarks/group2-cpu-wins.zh-CN.md](benchmarks/group2-cpu-wins.zh-CN.md) | CPU 赢的四个用例（c1、c3、c4、c5）：SQL、真实计划、证据、结果 |
 | 还没放进来 | 算子库、基准测试脚本、示例作业和工具（见第 3 节） |
 
 ## 6. 相关工作：其他项目是怎么加速 Flink 的

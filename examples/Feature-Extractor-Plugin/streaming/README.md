@@ -129,12 +129,12 @@ Six common recommendation feature and sample computations, written as Flink SQL 
 
 | Case | What it does (scenario) | Result (tuned, saturated) | Link |
 | --- | --- | --- | --- |
-| c1 Filter / cleaning | Filter on duration, play time, random-exposure flag, etc.; compute watch ratio, duration bucket, interaction count (sample cleaning) | CPU faster: 2.47M vs 2.06M rec/s (CPU +20%); at low/mid rates latency is <0.01 ms on CPU vs about 3 ms on GPU | [c1](benchmarks/README.md#c1-filter--cleaning) |
-| c2 Window aggregation | Per user, impressions / clicks / play time over the last 30 min (HOP, 5 min slide) and over 5 min TUMBLE (real-time statistical features) | GPU faster: HOP two-phase 1.86M vs 1.48M (GPU +26%), TUMBLE 2.02M vs 1.61M (GPU +25%); latency also lower | [c2](benchmarks/README.md#c2-per-user-clicks-over-the-last-n-minutes-window-aggregation-hop-and-tumble) |
-| c3 Per-user TopN | Top 10 longest-watched videos per user, ROW_NUMBER (top-K behavior features) | CPU faster: 1.36M vs 1.23M (CPU +11%); at parallelism 2/4 CPU is +38% / +21%. The GPU is mostly idle; the bottleneck is on the JVM side | [c3](benchmarks/README.md#c3-per-user-top-10-by-watch-time-topn) |
-| c4 Keep-last dedup | Keep the latest row per (user_id, video_id) (sample dedup) | CPU faster: 1.03M vs 0.85M (CPU +22%) | [c4](benchmarks/README.md#c4-keep-last-dedup) |
-| c5 Interval Join and fusion | Join impressions with clicks within 30 min; also with a following Filter and a following aggregation, fused on GPU (impression-click attribution) | Throughput favors CPU: join +15%, join-filter +17%, join-agg +24%; with aggregation, GPU p50 latency is about 23% lower. After tuning, fusion gives no throughput gain, only slightly lower latency for join-agg | [c5](benchmarks/README.md#c5-impression-x-click-interval-join-and-fusion-with-a-following-filter--aggregation) |
-| c6 Lookup Join | Look up a video dimension table per event to fetch author_id, INNER (item-side feature joins) | GPU faster: 2.28M vs 1.30M (GPU +76%); only 1.04M dimension rows were loaded, the full table was not tested; LEFT cannot run on GPU in this build | [c6](benchmarks/README.md#c6-feature-dimension-table-lookup-join) |
+| c1 Filter / cleaning | Filter on duration, play time, random-exposure flag, etc.; compute watch ratio, duration bucket, interaction count (sample cleaning) | CPU faster: 2.47M vs 2.06M rec/s (CPU +20%); at low/mid rates latency is <0.01 ms on CPU vs about 3 ms on GPU | [c1](benchmarks/group2-cpu-wins.md#c1-filter) |
+| c2 Window aggregation | Per user, impressions / clicks / play time over the last 30 min (HOP, 5 min slide) and over 5 min TUMBLE (real-time statistical features) | GPU faster: HOP two-phase 1.86M vs 1.48M (GPU +26%), TUMBLE 2.02M vs 1.61M (GPU +25%); latency also lower | [c2](benchmarks/group1-gpu-wins.md#c2-window) |
+| c3 Per-user TopN | Top 10 longest-watched videos per user, ROW_NUMBER (top-K behavior features) | CPU faster: 1.36M vs 1.23M (CPU +11%); at parallelism 2/4 CPU is +38% / +21%. The GPU is mostly idle; the bottleneck is on the JVM side | [c3](benchmarks/group2-cpu-wins.md#c3-topn) |
+| c4 Keep-last dedup | Keep the latest row per (user_id, video_id) (sample dedup) | CPU faster: 1.03M vs 0.85M (CPU +22%) | [c4](benchmarks/group2-cpu-wins.md#c4-dedup) |
+| c5 Interval Join and fusion | Join impressions with clicks within 30 min; also with a following Filter and a following aggregation, fused on GPU (impression-click attribution) | Throughput favors CPU: join +15%, join-filter +17%, join-agg +24%; with aggregation, GPU p50 latency is about 23% lower. After tuning, fusion gives no throughput gain, only slightly lower latency for join-agg | [c5](benchmarks/group2-cpu-wins.md#c5-join) |
+| c6 Lookup Join | Look up a video dimension table per event to fetch author_id, INNER (item-side feature joins) | GPU faster: 2.28M vs 1.30M (GPU +76%); only 1.04M dimension rows were loaded, the full table was not tested; LEFT cannot run on GPU in this build | [c6](benchmarks/group1-gpu-wins.md#c6-lookup) |
 
 In short: on this data the GPU helps for window aggregation (c2) and dimension lookups (c6). For filtering, TopN, dedup and interval join the CPU is not behind, since the cost is serialization, JVM state access and conversion. These are single-GPU results, mostly at parallelism 1.
 
@@ -146,7 +146,9 @@ In short: on this data the GPU helps for window aggregation (c2) and dimension l
 | [docs/bottlenecks.md](docs/bottlenecks.md) | the full bottleneck list with public evidence and our measurements |
 | [docs/related-work.md](docs/related-work.md) | how other projects accelerate Flink, one flow diagram each |
 | [docs/images/](docs/images) | figures used on these pages |
-| [benchmarks/README.md](benchmarks/README.md) | method, results and limits of the six test cases |
+| [benchmarks/README.md](benchmarks/README.md) | method, summary, limits and reproduction notes |
+| [benchmarks/group1-gpu-wins.md](benchmarks/group1-gpu-wins.md) | the two cases where the GPU won (c2, c6): SQL, real plans, evidence, results |
+| [benchmarks/group2-cpu-wins.md](benchmarks/group2-cpu-wins.md) | the four cases where the CPU won (c1, c3, c4, c5): SQL, real plans, evidence, results |
 | not here yet | the operator library, the benchmark driver scripts, example jobs and the tools (see section 3) |
 
 ## 6. Related work: how other projects accelerate Flink
