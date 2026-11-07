@@ -142,6 +142,7 @@ Qwen3-Next 这一行只测了一个模拟搜索场景；测速时开着后来因
 ## 安装
 
 ```bash
+python3 -m pip install -U "pip>=23"   # Ubuntu 22.04 自带的 pip 22 会把本包装成空包，先升级
 pip install .                 # 或：pip install -e ".[test]"（无硬性运行时依赖）
 ai-search-plugin list         # 组件、默认值、状态
 ai-search-plugin plan verl default max_staleness=2   # 打印会设置的环境变量 / 参数

@@ -142,6 +142,7 @@ In short: **training is the largest stage everywhere (60–89% of each step); we
 ## Install
 
 ```bash
+python3 -m pip install -U "pip>=23"   # pip 22 (Ubuntu 22.04 default) installs an empty package; upgrade first
 pip install .                 # or: pip install -e ".[test]"   (no hard runtime dependencies)
 ai-search-plugin list         # components, defaults, status
 ai-search-plugin plan verl default max_staleness=2   # print the env / arguments it would set
